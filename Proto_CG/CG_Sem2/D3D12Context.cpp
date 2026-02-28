@@ -15,7 +15,7 @@
 
 using namespace DirectX;
 
-// инициализация !!!
+// инициализация 
 bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
 {
     // размер окна
@@ -260,7 +260,7 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
     XMStoreFloat3(&m_cameraPos, eye);
 }
 
-// рендер !!!
+// рендер 
 void D3D12Context::Render(float r, float g, float b, float a)
 {
     //static int frame = 0;
@@ -419,7 +419,7 @@ void D3D12Context::WaitForGPU()
     }
 }
 
-// загрузка текстуры !!!
+// загрузка текстуры 
 bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 {
     if (!m_device || !m_commandList || !m_srvHeap)
@@ -427,13 +427,6 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
         OutputDebugStringA("CreateTextureFromFile: device/commandList/srvHeap is null\n");
         return false;
     }
-
-    // 0) Проверка что srvIndex влезает в heap (хотя бы грубо)
-    // (в D3D12 нельзя прочитать NumDescriptors у heap, так что просто sanity-check)
-    // Если хочешь — храни m_srvHeapCapacity в CreateSRVHeap.
-    // Тут оставим без жёсткой проверки.
-
-    // 1) Load image via stb_image (force RGBA8)
     int w = 0, h = 0, comp = 0;
     stbi_uc* pixels = stbi_load(filePath, &w, &h, &comp, 4);
     if (!pixels || w <= 0 || h <= 0)
@@ -442,7 +435,6 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
         return false;
     }
 
-    // 2) Create DEFAULT heap texture (GPU resource)
     D3D12_RESOURCE_DESC texDesc{};
     texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     texDesc.Alignment = 0;
@@ -459,13 +451,14 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
     D3D12_HEAP_PROPERTIES defaultHeap{};
     defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture; // сюда кладем созданный ресурс текстуры
 
+    // создаем текстуру в видеопамяти
     HRESULT hr = m_device->CreateCommittedResource(
         &defaultHeap,
         D3D12_HEAP_FLAG_NONE,
         &texDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST,  // важно: сначала COPY_DEST
+        D3D12_RESOURCE_STATE_COPY_DEST,  
         nullptr,
         IID_PPV_ARGS(&texture));
 
@@ -476,7 +469,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
         return false;
     }
 
-    // 3) Create UPLOAD buffer for texture data
+    
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT numRows = 0;
     UINT64 rowSizeInBytes = 0;
@@ -523,7 +516,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
         return false;
     }
 
-    // 4) Copy pixels -> upload (учитывая RowPitch)
+    
     void* mapped = nullptr;
     hr = upload->Map(0, nullptr, &mapped);
     if (FAILED(hr) || !mapped)
@@ -548,8 +541,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
     upload->Unmap(0, nullptr);
     stbi_image_free(pixels);
 
-    // 5) Record COPY + BARRIER into CURRENT m_commandList
-    // ВАЖНО: тут НЕТ Reset/Execute/Wait — этим управляет Initialize()
+    
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource = texture.Get();
@@ -573,7 +565,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 
     m_commandList->ResourceBarrier(1, &barrier);
 
-    // 6) Create SRV descriptor at [srvIndex]
+    
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -588,7 +580,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 
     m_device->CreateShaderResourceView(texture.Get(), &srv, cpuHandle);
 
-    // 7) Keep resources alive
+    
     m_textures.push_back(texture);
     m_textureUploads.push_back(upload);
 
@@ -826,7 +818,7 @@ bool D3D12Context::CreateSRVHeap(UINT numDescriptors)
     return true;
 }
 
-// массив для текстур !!!
+// массив для текстур 
 bool D3D12Context::CreateRootSignature()
 {
     const UINT MaxSrvCount = 8;
@@ -1308,7 +1300,7 @@ bool D3D12Context::CreateConstantBuffer()
 }
 
 
-// тайлинг и офсет !!!
+// тайлинг и офсет 
 void D3D12Context::SetTime(float t)
 {
     m_time = t;
