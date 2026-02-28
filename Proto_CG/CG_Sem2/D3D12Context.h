@@ -19,6 +19,7 @@ struct PerObjectCB
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
     XMFLOAT4 UVTransform; // для тайлинга и офсета 
+    XMFLOAT4 TimeParams;
 };
 
 // кусок модели 1 матреиалом

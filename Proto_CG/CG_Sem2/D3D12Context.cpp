@@ -18,209 +18,86 @@ using namespace DirectX;
 // инициализация 
 bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
 {
-    // размер окна
     m_width = width;
     m_height = height;
 
-    // создание устройства 
-    if (!CreateDevice()) {
-        MessageBoxW(nullptr, L"CreateDevice FAILED", L"DX12", MB_OK);
-        return false;
-    }
+    if (!CreateDevice()) return false;
+    if (!CreateCommandObjects()) return false;
+    if (!CreateSwapChain(hwnd)) return false;
+    if (!CreateRTV()) return false;
+    if (!CreateDepthStencil()) return false;
+    if (!CreateFence()) return false;
+    if (!CompileShaders()) return false;
+    if (!CreateRootSignature()) return false;
+    if (!CreatePipelineState()) return false;
 
-    // список команд
-    if (!CreateCommandObjects()) {
-        MessageBoxW(nullptr, L"CreateCommandObjects FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    // буферы кадров
-    if (!CreateSwapChain(hwnd)) {
-        MessageBoxW(nullptr, L"CreateSwapChain FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    // для рисования буферов
-    if (!CreateRTV()) {
-        MessageBoxW(nullptr, L"CreateRTV FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    // буфер глубины 
-    if (!CreateDepthStencil()) {
-        MessageBoxW(nullptr, L"CreateDepthStencil FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    if (!CreateFence()) {
-        MessageBoxW(nullptr, L"CreateFence FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-
-    // шейдеры
-    if (!CompileShaders()) {
-        MessageBoxW(nullptr, L"CompileShaders FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    if (!CreateRootSignature()) {
-        MessageBoxW(nullptr, L"CreateRootSignature FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    if (!CreatePipelineState()) {
-        MessageBoxW(nullptr, L"CreatePipelineState FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    // текстуры
     const UINT MaxSrvCount = 8;
-    if (!CreateSRVHeap(MaxSrvCount)) {
-        MessageBoxW(nullptr, L"CreateSRVHeap FAILED", L"DX12", MB_OK);
-        return false;
-    }
+    if (!CreateSRVHeap(MaxSrvCount)) return false;
 
-    // определение папки .exe
+    // ===============================
+    // Подготовка путей
+    // ===============================
     char exeDirA[MAX_PATH];
     GetModuleFileNameA(nullptr, exeDirA, MAX_PATH);
     char* lastSlash = strrchr(exeDirA, '\\');
     if (lastSlash) *(lastSlash + 1) = '\0';
     std::string exeDir = exeDirA;
 
-    // модель и текстура
     std::string modelsDir = exeDir + "models\\";
     std::string objPath = modelsDir + "Y02KIUZDQIQUI871CWZ8ZL02C.obj";
     std::string mtlDir = modelsDir;
-    std::string defaultTex = modelsDir + "texture.jpg";
 
-    OutputDebugStringA(("OBJ PATH: " + objPath + "\n").c_str());
-    OutputDebugStringA(("MTL DIR : " + mtlDir + "\n").c_str());
-    OutputDebugStringA(("DEF TEX : " + defaultTex + "\n").c_str());
+    // ДВЕ ТЕКСТУРЫ ДЛЯ СИНУС-ПЕРЕХОДА
+    std::string texA = modelsDir + "texture.jpg";
+    std::string texB = modelsDir + "grjfg.jpg";
 
-    // загрузка модели
+    // ===============================
+    // Reset командного листа
+    // ===============================
+    m_commandAllocator->Reset();
+    m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+
+    // ===============================
+    // 1. Грузим две текстуры строго в srv0 и srv1
+    // ===============================
+    if (!CreateTextureFromFile(texA.c_str(), 0))
+        return false;
+
+    if (!CreateTextureFromFile(texB.c_str(), 1))
+        return false;
+
+    // ===============================
+    // 2. Загружаем модель
+    // ===============================
     bool modelLoaded = LoadModelFromOBJ(objPath.c_str(), mtlDir.c_str());
 
     if (!modelLoaded)
     {
-        OutputDebugStringA("OBJ load failed. Using fallback cube.\n");
-
-        if (!CreateGeometry()) {
-            MessageBoxW(nullptr, L"CreateGeometry FAILED", L"DX12", MB_OK);
+        if (!CreateGeometry())
             return false;
-        }
 
         m_submeshes.clear();
         Submesh sm{};
         sm.IndexStart = 0;
         sm.IndexCount = m_indexCount;
         sm.MaterialId = -1;
-        sm.SrvIndex = 0;
+        sm.SrvIndex = 0; // не важно
         m_submeshes.push_back(sm);
-
-        // куб без материалов
-        m_materialDiffusePaths.clear();
-        m_materialToSrv.clear();
-    }
-    else
-    {
-        // модель без текстуры
-        if (m_submeshes.empty())
-        {
-            Submesh sm{};
-            sm.IndexStart = 0;
-            sm.IndexCount = m_indexCount;
-            sm.MaterialId = -1;
-            sm.SrvIndex = 0;
-            m_submeshes.push_back(sm);
-        }
     }
 
-
-    if (FAILED(m_commandAllocator->Reset())) {
-        MessageBoxW(nullptr, L"CommandAllocator Reset FAILED", L"DX12", MB_OK);
-        return false;
-    }
-    if (FAILED(m_commandList->Reset(m_commandAllocator.Get(), nullptr))) {
-        MessageBoxW(nullptr, L"CommandList Reset FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
-    UINT nextSrv = 0; // счетчик текстур
-
-    // загрузка текстуры
-    if (!CreateTextureFromFile(defaultTex.c_str(), nextSrv)) {
-        MessageBoxW(nullptr, L"Default texture load FAILED", L"DX12", MB_OK);
-        return false;
-    }
-    nextSrv++;
-
-    // заполнение массива текстур
-    if (modelLoaded && !m_materialDiffusePaths.empty())
-    {
-        m_materialToSrv.assign(m_materialDiffusePaths.size(), 0);
-
-        for (size_t i = 0; i < m_materialDiffusePaths.size(); ++i)
-        {
-            const std::string& rel = m_materialDiffusePaths[i];
-            if (rel.empty())
-            {
-                m_materialToSrv[i] = 0;
-                continue;
-            }
-
-            if (nextSrv >= MaxSrvCount)
-            {
-                // места в heap больше нет — fallback на default
-                m_materialToSrv[i] = 0;
-                continue;
-            }
-
-            // ВАЖНО: tinyobj может давать "textures/xxx.jpg"
-            // fullPath станет models\textures\xxx.jpg
-            std::string fullPath = modelsDir + rel;
-
-            OutputDebugStringA(("TRY LOAD: " + fullPath + "\n").c_str());
-
-            if (CreateTextureFromFile(fullPath.c_str(), nextSrv))
-            {
-                m_materialToSrv[i] = nextSrv;
-                nextSrv++;
-            }
-            else
-            {
-                m_materialToSrv[i] = 0; // default
-            }
-        }
-
-        // назначаем srv сабмешам
-        for (auto& sm : m_submeshes)
-        {
-            if (sm.MaterialId >= 0 && sm.MaterialId < (int)m_materialToSrv.size())
-                sm.SrvIndex = m_materialToSrv[(size_t)sm.MaterialId];
-            else
-                sm.SrvIndex = 0;
-        }
-    }
-    else
-    {
-        for (auto& sm : m_submeshes)
-            sm.SrvIndex = 0;
-    }
-
-    if (FAILED(m_commandList->Close())) {
-        MessageBoxW(nullptr, L"CommandList Close FAILED", L"DX12", MB_OK);
-        return false;
-    }
-
+    // ===============================
+    // Закрываем список команд
+    // ===============================
+    m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(1, lists);
     WaitForGPU();
 
-    if (!CreateConstantBuffer()) {
-        MessageBoxW(nullptr, L"CreateConstantBuffer FAILED", L"DX12", MB_OK);
+    // ===============================
+    // Constant buffer
+    // ===============================
+    if (!CreateConstantBuffer())
         return false;
-    }
 
     return true;
 }
@@ -263,13 +140,11 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
 // рендер 
 void D3D12Context::Render(float r, float g, float b, float a)
 {
-    //static int frame = 0;
-    //if ((frame++ % 60) == 0) printf("Render frame: %d\n", frame);
-
-    // очитстка листа команд
+    // 1) Начинаем новый список команд
     m_commandAllocator->Reset();
     m_commandList->Reset(m_commandAllocator.Get(), m_pso.Get());
 
+    // 2) BackBuffer: Present -> RenderTarget
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -279,19 +154,21 @@ void D3D12Context::Render(float r, float g, float b, float a)
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     m_commandList->ResourceBarrier(1, &barrier);
 
+    // 3) Берём RTV текущего backbuffer и DSV depth
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += SIZE_T(m_frameIndex) * SIZE_T(m_rtvDescriptorSize);
 
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
 
-    // очитска экрана
+    // 4) Очищаем экран и depth
     float clearColor[4] = { r, g, b, a };
     m_commandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     m_commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    // куда рисовать
+
+    // 5) Куда рисовать
     m_commandList->OMSetRenderTargets(1, &rtv, TRUE, &dsv);
 
-    // карта до размеров экрана
+    // 6) Viewport + Scissor
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = 0.f;
     vp.TopLeftY = 0.f;
@@ -300,7 +177,6 @@ void D3D12Context::Render(float r, float g, float b, float a)
     vp.MinDepth = 0.f;
     vp.MaxDepth = 1.f;
 
-    // не рисовать за пределами прямоугольника
     D3D12_RECT sc{};
     sc.left = 0;
     sc.top = 0;
@@ -309,36 +185,38 @@ void D3D12Context::Render(float r, float g, float b, float a)
 
     m_commandList->RSSetViewports(1, &vp);
     m_commandList->RSSetScissorRects(1, &sc);
+
+    // 7) Root signature
     m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-    // подключение таблицы текстур
+    // 8) Подключаем SRV heap (текстуры)
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     m_commandList->SetDescriptorHeaps(1, heaps);
 
-    // обновление и запись в 0 слот в буффере
+    // 9) Обновляем constant buffer и биндим в root param 0 (b0)
     UpdateCB();
     m_commandList->SetGraphicsRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
 
-    // геометрия 
-    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // треугольники
-    m_commandList->IASetVertexBuffers(0, 1, &m_vbView); // вершины
-    m_commandList->IASetIndexBuffer(&m_ibView); // индексы
-
-    // указатель на первый дескриптор
+    // 10) ВАЖНО ДЛЯ ВАРИАНТА A:
+    // root param 1 = SRV table, ставим НАЧАЛО heap.
+    // Тогда в шейдере:
+    //   t0 -> srv0 (TextureA)
+    //   t1 -> srv1 (TextureB)
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+    m_commandList->SetGraphicsRootDescriptorTable(1, baseGpu);
 
-    // рисование по сабмешам
+    // 11) Геометрия
+    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_commandList->IASetVertexBuffers(0, 1, &m_vbView);
+    m_commandList->IASetIndexBuffer(&m_ibView);
+
+    // 12) Рисуем.
+    // Сабмеши оставляем только ради разных диапазонов индексов (материалы),
+    // но текстуру НЕ переключаем (переход всегда между t0 и t1).
     if (!m_submeshes.empty())
     {
         for (const auto& sm : m_submeshes)
         {
-            // root param 1 = SRV table. Мы сдвигаем базу на нужный srvIndex,
-            // и тогда в шейдере t0 будет указывать на "текущую" текстуру.
-            D3D12_GPU_DESCRIPTOR_HANDLE texHandle = baseGpu;
-            texHandle.ptr += SIZE_T(sm.SrvIndex) * SIZE_T(m_srvDescriptorSize);
-
-            m_commandList->SetGraphicsRootDescriptorTable(1, texHandle);
-
             m_commandList->DrawIndexedInstanced(
                 sm.IndexCount,
                 1,
@@ -349,24 +227,21 @@ void D3D12Context::Render(float r, float g, float b, float a)
     }
     else
     {
-        // одна текстура
-        m_commandList->SetGraphicsRootDescriptorTable(1, baseGpu);
         m_commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
     }
 
-    // переход из буфера в режим показа
+    // 13) BackBuffer: RenderTarget -> Present
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
     m_commandList->ResourceBarrier(1, &barrier);
 
-    // закрытие списка команд и переход к видеокарте
+    // 14) Отправляем команды на GPU и показываем кадр
     m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(1, lists);
 
-    // показ кадра на экране
     m_swapChain->Present(1, 0);
-    printf("Presented\n");
 
+    // 15) Стабильно, но медленно
     WaitForGPU();
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 }
@@ -392,7 +267,7 @@ void D3D12Context::UpdateCB()
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&m_cbData.View, XMMatrixTranspose(view));
     XMStoreFloat4x4(&m_cbData.Proj, XMMatrixTranspose(proj));
-
+    // текстурная анимация
     float uOff = std::fmod(m_time * m_uvScrollSpeed.x, 1.0f);
     float vOff = std::fmod(m_time * m_uvScrollSpeed.y, 1.0f);
     if (uOff < 0.0f) uOff += 1.0f;
@@ -402,6 +277,8 @@ void D3D12Context::UpdateCB()
         m_uvTiling.x, m_uvTiling.y,
         uOff, vOff
     );
+
+    m_cbData.TimeParams = XMFLOAT4(m_time, 1.0f, 0.0f, 0.0f);
 
     memcpy(m_cbMappedData, &m_cbData, sizeof(PerObjectCB));
 }

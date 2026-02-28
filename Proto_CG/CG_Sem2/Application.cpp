@@ -71,7 +71,8 @@ int Application::Run()
 
         // скорость для 
         const float rotateSpeed = 0.005f; 
-        const float dollySpeed = 0.2f;    
+        const float dollySpeed = 0.2f; 
+
 
         m_dx12.UpdateCameraOrbit(
             deltaTime,
