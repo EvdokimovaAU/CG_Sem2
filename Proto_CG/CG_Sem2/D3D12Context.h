@@ -5,30 +5,29 @@
 #include <DirectXMath.h>
 #include <wrl.h>
 #include <string>
-#include <vector>              //  ADD
+#include <vector>             
 #include "tiny_obj_loader.h"
 #include <d3dcompiler.h>
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
+// РїР°СЂР°РјРµС‚СЂС‹ РјРѕРґРµР»Рё, РєР°РјРµСЂС‹ Рё С‚РµРєСЃС‚СѓСЂС‹
 struct PerObjectCB
 {
     XMFLOAT4X4 World;
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
-
-    // xy = tiling, zw = offset
-    XMFLOAT4 UVTransform;
+    XMFLOAT4 UVTransform; // РґР»СЏ С‚Р°Р№Р»РёРЅРіР° Рё РѕС„СЃРµС‚Р° 
 };
 
-//  ADD: сабмеш (диапазон индексов + материал)
+// РєСѓСЃРѕРє РјРѕРґРµР»Рё 1 РјР°С‚СЂРµРёР°Р»РѕРј
 struct Submesh
 {
     UINT IndexStart = 0;
     UINT IndexCount = 0;
-    int  MaterialId = -1;   // tinyobj material_id (может быть -1)
-    UINT SrvIndex = 0;      // какой SRV использовать (0 = default)
+    int  MaterialId = -1;
+    UINT SrvIndex = 0;
 };
 
 class D3D12Context
@@ -50,10 +49,11 @@ public:
         float mouseDeltaX, float mouseDeltaY);
 
 private:
-    float   m_time = 0.0f;
 
-    XMFLOAT2 m_uvTiling = { 1.0f, 1.0f };
-    XMFLOAT2 m_uvScrollSpeed = { 0.0f, 0.0f }; // например {0.15f, 0.0f}
+    float   m_time = 0.0f; // С‚РµРєСѓС‰РµРµ РІСЂРµРјСЏ СЃС†РµРЅС‹
+
+    XMFLOAT2 m_uvTiling = { 1.0f, 1.0f }; // С‚Р°Р№Р»РёРЅРі
+    XMFLOAT2 m_uvScrollSpeed = { 0.0f, 0.0f }; // СЃРєРѕСЂРѕСЃС‚СЊ РґРІРёР¶РµРЅРёСЏ С‚РµРєСЃС‚СѓСЂС‹
 
     bool CreateDevice();
     bool CreateCommandObjects();
@@ -68,11 +68,7 @@ private:
     bool LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir);
     bool CreateConstantBuffer();
     bool CompileShaders();
-
-    //  CHANGE: теперь указываем, в какой слот SRV heap писать
     bool CreateTextureFromFile(const char* filePath, UINT srvIndex);
-
-    //  CHANGE: теперь задаём размер heap = 1 + numMaterials
     bool CreateSRVHeap(UINT numDescriptors);
 
     void UpdateCB();
@@ -84,10 +80,6 @@ private:
 
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textureUploads;
-
-    // --- texture resources (старые оставляем, но для множественных текстур нужны массивы ниже)
-    //ComPtr<ID3D12Resource> m_texture;
-    //ComPtr<ID3D12Resource> m_textureUpload;
 
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGISwapChain3> m_swapChain;
@@ -128,28 +120,24 @@ private:
 
     float m_rotationT = 0.f;
 
-    // Orbit camera state
-    DirectX::XMFLOAT3 m_cameraTarget = { 0.0f, 0.2f, 0.0f }; // выше
-    float m_cameraDistance = 15.0f;   // ближе
+    // РѕР±Р·РѕСЂ РєР°РµРјСЂС‹
+    DirectX::XMFLOAT3 m_cameraTarget = { 0.0f, 0.2f, 0.0f };
+    float m_cameraDistance = 15.0f;   // СЂР°СЃС‚РѕСЏРЅРёРµ
     float m_cameraYaw = 0.0f;
-    float m_cameraPitch = -0.5f;      // слегка сверху
+    float m_cameraPitch = -0.5f;  // РІС‹СЃРѕС‚Р°
 
-    // Derived each frame from orbit parameters
+    // СЂР°СЃРїРѕР»РѕР¶РµРЅРёРµ РєР°РјРµСЂС‹
     XMFLOAT3 m_cameraPos = { 0.0f, 5.0f, -20.0f };
 
-    // SRV heap
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     UINT m_srvDescriptorSize = 0;
 
-    //  ADD: сабмеши (диапазоны индексов по материалам)
+    // РґРёР°РїР°Р·РѕРЅС‹ РёРЅРґРµРєСЃРѕРІ РїРѕ РјР°С‚РµСЂРёР°Р»Р°Рј
     std::vector<Submesh> m_submeshes;
 
-    //  ADD: diffuse текстуры материалов из MTL (например "spnza_diffuse.png")
+    // С‚РµРєСЃС‚СѓСЂС‹ РјР°С‚РµСЂРёР°Р»РѕРІ РёР· MTL 
     std::vector<std::string> m_materialDiffusePaths;
 
-    //  ADD: материал -> srvIndex (0 = default)
+    // РјР°С‚РµСЂРёР°Р» 
     std::vector<UINT> m_materialToSrv;
-
-    //  ADD: храним все загруженные текстуры, чтобы они не уничтожились
-    //std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;
 };

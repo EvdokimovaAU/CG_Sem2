@@ -22,13 +22,5 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         true
     );
 
-    /*if (!ret)
-    {
-        std::cerr << ".obj load error: " << err << std::endl;
-        return 1;
-    }*/
-
-
-
     return app.Run();
 }

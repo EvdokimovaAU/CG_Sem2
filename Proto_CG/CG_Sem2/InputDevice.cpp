@@ -24,7 +24,6 @@ void InputDevice::OnMouseMove(int x, int y)
         m_lastMouseY = y;
         m_firstMouse = false;
 
-        // На первом move после ResetMouseAnchor не даём дельту
         m_mouseDeltaX = 0;
         m_mouseDeltaY = 0;
         return;

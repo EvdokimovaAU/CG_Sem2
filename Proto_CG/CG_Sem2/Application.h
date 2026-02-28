@@ -15,7 +15,7 @@ public:
     int  Run();
 
 private:
-    HINSTANCE   m_hInstance{};
+    HINSTANCE   m_hInstance{}; 
     int         m_nCmdShow{};
 
     Win32Window  m_window;

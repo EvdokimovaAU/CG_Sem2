@@ -16,8 +16,6 @@ public:
 
     void GetMouseDelta(int& dx, int& dy) const;
     void ResetMouseDelta();
-
-    // „тобы не было огромного скачка дельты при первом движении мыши после клика
     void ResetMouseAnchor();
 
 private:

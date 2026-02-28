@@ -27,8 +27,9 @@ bool Application::Initialize()
         MessageBoxW(nullptr, L"DX12 Initialize FAILED (see Output window)", L"Error", MB_OK);
         return false;
     }
-
-    m_dx12.SetUVTiling(4.0f, 4.0f);          // Ú‡ÈÎËÌ„ 4x4
+    
+    
+    m_dx12.SetUVTiling(4.0f, 4.0f);          
     m_dx12.SetUVScrollSpeed(0.15f, 0.0f);
 
     m_timer.Reset();
@@ -58,8 +59,6 @@ int Application::Run()
         m_timer.Tick();
         float deltaTime = m_timer.DeltaTime();
 
-        // RMB drag = orbit rotate
-        // LMB drag up/down = dolly
         bool orbitRotate = m_input.IsMouseButtonDown(VK_RBUTTON);
         bool dolly = m_input.IsMouseButtonDown(VK_LBUTTON);
 
@@ -70,8 +69,9 @@ int Application::Run()
         }
         m_input.ResetMouseDelta();
 
-        const float rotateSpeed = 0.005f; // radians-per-pixel-ish
-        const float dollySpeed = 0.2f;    // distance units per pixel
+        // —Å–∫–æ—Ä–æ—Å—Ç—å –¥–ª—è 
+        const float rotateSpeed = 0.005f; 
+        const float dollySpeed = 0.2f;    
 
         m_dx12.UpdateCameraOrbit(
             deltaTime,
