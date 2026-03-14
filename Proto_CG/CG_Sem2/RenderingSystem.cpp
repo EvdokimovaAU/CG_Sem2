@@ -1,4 +1,4 @@
-#include "RenderingSystem.h"
+﻿#include "RenderingSystem.h"
 
 #include <array>
 #include <cstring>
@@ -11,6 +11,15 @@ using namespace DirectX;
 
 namespace
 {
+    struct DebugOverlayConstants
+    {
+        XMFLOAT4 OverlayRect;
+        XMFLOAT4 SceneCenter;
+        XMFLOAT4 SceneExtents;
+        UINT DebugMode = 0;
+        UINT Padding[3] = {};
+    };
+
     bool ResolveShaderPath(const wchar_t* fileName, wchar_t* outPath, size_t outPathCount)
     {
         wchar_t exeDir[MAX_PATH];
@@ -54,7 +63,7 @@ bool RenderingSystem::Initialize(HWND hwnd, UINT width, UINT height)
 
     return InitializeDeferredResources();
 }
-
+// корректное завершение рендера и очистка памяти
 void RenderingSystem::Shutdown()
 {
     if (m_deferredLightCBMappedData != nullptr && m_deferredLightConstantBuffer != nullptr)
@@ -66,11 +75,15 @@ void RenderingSystem::Shutdown()
     m_deferredLightConstantBuffer.Reset();
     m_deferredGeometryPSO.Reset();
     m_deferredLightingPSO.Reset();
+    m_debugOverlayPSO.Reset();
+    m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
     m_deferredGeometryVS.Reset();
     m_deferredGeometryPS.Reset();
     m_deferredLightingVS.Reset();
     m_deferredLightingPS.Reset();
+    m_debugOverlayVS.Reset();
+    m_debugOverlayPS.Reset();
     m_gbuffer.Shutdown();
     m_context.Shutdown();
 }
@@ -127,6 +140,7 @@ void RenderingSystem::UpdateCameraOrbit(
         mouseDeltaY);
 }
 
+// выбирает способ отрисовки
 void RenderingSystem::RenderFrame()
 {
     switch (m_technique)
@@ -161,10 +175,11 @@ void RenderingSystem::RenderDeferredFrame()
     m_context.BeginFrame();
     RenderOpaqueStage();
     RenderLightingStage();
+    RenderGBufferDebugOverlay();
     RenderTransparentStage();
     m_context.EndFrame();
 }
-
+// свойства поверхности для GBuffer
 void RenderingSystem::RenderOpaqueStage()
 {
     ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
@@ -191,6 +206,7 @@ void RenderingSystem::RenderOpaqueStage()
     m_gbuffer.EndGeometryPass(commandList);
 }
 
+// рачсет освещения
 void RenderingSystem::RenderLightingStage()
 {
     ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
@@ -220,12 +236,15 @@ void RenderingSystem::RenderTransparentStage()
 {
 }
 
+// инициализация Deferred Resources
 bool RenderingSystem::InitializeDeferredResources()
 {
     return CompileDeferredShaders() &&
         CreateDeferredLightingRootSignature() &&
         CreateDeferredGeometryPipeline() &&
         CreateDeferredLightingPipeline() &&
+        CreateDebugOverlayRootSignature() &&
+        CreateDebugOverlayPipeline() &&
         CreateLightingConstantBuffer();
 }
 
@@ -238,8 +257,10 @@ bool RenderingSystem::CompileDeferredShaders()
 
     wchar_t geometryPath[MAX_PATH];
     wchar_t lightingPath[MAX_PATH];
+    wchar_t debugPath[MAX_PATH];
     if (!ResolveShaderPath(L"DeferredGeometry.hlsl", geometryPath, MAX_PATH) ||
-        !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH))
+        !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH) ||
+        !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH))
     {
         return false;
     }
@@ -299,9 +320,40 @@ bool RenderingSystem::CompileDeferredShaders()
         0,
         &m_deferredLightingPS,
         nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        debugPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_debugOverlayVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        debugPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        flags,
+        0,
+        &m_debugOverlayPS,
+        nullptr);
     return SUCCEEDED(hr);
 }
 
+// что может читать шейдер
 bool RenderingSystem::CreateDeferredLightingRootSignature()
 {
     D3D12_DESCRIPTOR_RANGE srvRange{};
@@ -344,6 +396,50 @@ bool RenderingSystem::CreateDeferredLightingRootSignature()
         IID_PPV_ARGS(&m_deferredLightingRootSignature)));
 }
 
+bool RenderingSystem::CreateDebugOverlayRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE srvRange{};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = GBuffer::TargetCount;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParams[2]{};
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[0].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParams[1].Constants.ShaderRegister = 0;
+    rootParams[1].Constants.Num32BitValues = sizeof(DebugOverlayConstants) / sizeof(UINT);
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = _countof(rootParams);
+    desc.pParameters = rootParams;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &desc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_debugOverlayRootSignature)));
+}
+
+//сцена рисуется не в один цветовой буфер, а сразу в несколько текстур GBuffer
 bool RenderingSystem::CreateDeferredGeometryPipeline()
 {
     D3D12_INPUT_ELEMENT_DESC layout[] =
@@ -387,6 +483,7 @@ bool RenderingSystem::CreateDeferredGeometryPipeline()
     return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_deferredGeometryPSO)));
 }
 
+// считывание освещения из буфера
 bool RenderingSystem::CreateDeferredLightingPipeline()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
@@ -410,6 +507,94 @@ bool RenderingSystem::CreateDeferredLightingPipeline()
     return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_deferredLightingPSO)));
 }
 
+bool RenderingSystem::CreateDebugOverlayPipeline()
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_debugOverlayRootSignature.Get();
+    pso.VS = { m_debugOverlayVS->GetBufferPointer(), m_debugOverlayVS->GetBufferSize() };
+    pso.PS = { m_debugOverlayPS->GetBufferPointer(), m_debugOverlayPS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_debugOverlayPSO)));
+}
+
+void RenderingSystem::RenderGBufferDebugOverlay()
+{
+    if (!m_debugOverlayPSO || !m_debugOverlayRootSignature)
+    {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+
+    ID3D12DescriptorHeap* heaps[] = { m_gbuffer.GetSRVHeap() };
+    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, nullptr);
+    commandList->SetPipelineState(m_debugOverlayPSO.Get());
+    commandList->SetGraphicsRootSignature(m_debugOverlayRootSignature.Get());
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootDescriptorTable(0, m_gbuffer.GetSRVGPU(GBuffer::Slot::AlbedoSpec));
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const float width = static_cast<float>(m_width);
+    const float height = static_cast<float>(m_height);
+    const float padding = (std::max)(12.0f, width * 0.0125f);
+    const float tileWidth = (std::max)(width * 0.22f, 180.0f);
+    const float tileHeight = tileWidth * 0.58f;
+
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+
+    const std::array<D3D12_VIEWPORT, GBuffer::TargetCount> viewports =
+    {
+        D3D12_VIEWPORT{ padding, padding, tileWidth, tileHeight, 0.0f, 1.0f },
+        D3D12_VIEWPORT{ width - padding - tileWidth, padding, tileWidth, tileHeight, 0.0f, 1.0f },
+        D3D12_VIEWPORT{ padding, height - padding - tileHeight, tileWidth, tileHeight, 0.0f, 1.0f },
+        D3D12_VIEWPORT{ width - padding - tileWidth, height - padding - tileHeight, tileWidth, tileHeight, 0.0f, 1.0f }
+    };
+
+    for (UINT i = 0; i < GBuffer::TargetCount; ++i)
+    {
+        const D3D12_VIEWPORT& viewport = viewports[i];
+        D3D12_RECT scissor{};
+        scissor.left = static_cast<LONG>(viewport.TopLeftX);
+        scissor.top = static_cast<LONG>(viewport.TopLeftY);
+        scissor.right = static_cast<LONG>(viewport.TopLeftX + viewport.Width);
+        scissor.bottom = static_cast<LONG>(viewport.TopLeftY + viewport.Height);
+
+        DebugOverlayConstants constants{};
+        constants.OverlayRect = XMFLOAT4(
+            viewport.TopLeftX,
+            viewport.TopLeftY,
+            viewport.Width,
+            viewport.Height);
+        constants.SceneCenter = XMFLOAT4(sceneCenter.x, sceneCenter.y, sceneCenter.z, 1.0f);
+        constants.SceneExtents = XMFLOAT4(sceneExtents.x, sceneExtents.y, sceneExtents.z, 1.0f);
+        constants.DebugMode = i;
+
+        commandList->RSSetViewports(1, &viewport);
+        commandList->RSSetScissorRects(1, &scissor);
+        commandList->SetGraphicsRoot32BitConstants(
+            1,
+            sizeof(DebugOverlayConstants) / sizeof(UINT),
+            &constants,
+            0);
+        commandList->DrawInstanced(3, 1, 0, 0);
+    }
+}
+// передача источников света в буфер света
 bool RenderingSystem::CreateLightingConstantBuffer()
 {
     const UINT cbSize = (sizeof(DeferredLightCB) + 255) & ~255u;
@@ -508,3 +693,4 @@ void RenderingSystem::UpdateLightingConstants()
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
 }
+

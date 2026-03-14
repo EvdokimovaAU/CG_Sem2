@@ -46,12 +46,15 @@ private:
     void RenderDeferredFrame();
     void RenderOpaqueStage();
     void RenderLightingStage();
+    void RenderGBufferDebugOverlay();
     void RenderTransparentStage();
     bool InitializeDeferredResources();
     bool CompileDeferredShaders();
     bool CreateDeferredLightingRootSignature();
     bool CreateDeferredGeometryPipeline();
     bool CreateDeferredLightingPipeline();
+    bool CreateDebugOverlayRootSignature();
+    bool CreateDebugOverlayPipeline();
     bool CreateLightingConstantBuffer();
     void UpdateLightingConstants();
 
@@ -87,9 +90,13 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayPS;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_deferredLightingRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_debugOverlayRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredLightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_debugOverlayPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_deferredLightConstantBuffer;
     UINT8* m_deferredLightCBMappedData = nullptr;
 };

@@ -23,6 +23,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD0;
     float3 NormalW : TEXCOORD1;
     float2 UV : TEXCOORD2;
+    float ViewDepth : TEXCOORD3;
 };
 
 struct GBufferOutput
@@ -41,6 +42,7 @@ PSInput VSMain(VSInput input)
     float4 posV = mul(posW, View);
     o.PosH = mul(posV, Proj);
     o.WorldPos = posW.xyz;
+    o.ViewDepth = posV.z;
 
     float3x3 W3 = (float3x3)World;
     o.NormalW = normalize(mul(W3, input.Norm));
@@ -56,7 +58,7 @@ GBufferOutput PSMain(PSInput input)
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
     float4 albedo = gTex.Sample(gSampler, uv);
     float3 normal = normalize(input.NormalW);
-    float depth = input.PosH.z / max(input.PosH.w, 0.0001f);
+    float depth = saturate(input.ViewDepth / 20000.0f);
 
     o.AlbedoSpec = albedo;
     o.WorldPos = float4(input.WorldPos, 1.0f);
