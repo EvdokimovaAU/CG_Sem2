@@ -36,9 +36,7 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
 
     if (!CreateSRVHeap(MaxSrvCount)) return false;
 
-    // ===============================
     // Подготовка путей
-    // ===============================
     char exeDirA[MAX_PATH];
     GetModuleFileNameA(nullptr, exeDirA, MAX_PATH);
     char* lastSlash = strrchr(exeDirA, '\\');
@@ -49,23 +47,19 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     std::string objPath = modelsDir + "sponza.obj";
     std::string mtlDir = modelsDir;
 
-    // ДВЕ ТЕКСТУРЫ ДЛЯ СИНУС-ПЕРЕХОДА
 
-    // ===============================
+  
     // Reset командного листа
-    // ===============================
     m_commandAllocator->Reset();
     m_commandList->Reset(m_commandAllocator.Get(), nullptr);
 
-    // ===============================
-    // 1. Грузим две текстуры строго в srv0 и srv1
-    // ===============================
+   
+    //загрузка 2 тетктсур в  srv0 и srv1
     if (!CreateSolidColorTexture(0xffffffffu, 0))
         return false;
 
-    // ===============================
-    // 2. Загружаем модель
-    // ===============================
+
+    // загрузка модели
     bool modelLoaded = LoadModelFromOBJ(objPath.c_str(), mtlDir.c_str());
 
     if (!modelLoaded)
@@ -78,21 +72,17 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
         sm.IndexStart = 0;
         sm.IndexCount = m_indexCount;
         sm.MaterialId = -1;
-        sm.SrvIndex = 0; // не важно
+        sm.SrvIndex = 0;
         m_submeshes.push_back(sm);
     }
 
-    // ===============================
-    // Закрываем список команд
-    // ===============================
+   // закрытие списка команд
     m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(1, lists);
     WaitForGPU();
 
-    // ===============================
-    // Constant buffer
-    // ===============================
+  // константный буфер
     if (!CreateConstantBuffer())
         return false;
 
@@ -137,11 +127,11 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
 // рендер 
 void D3D12Context::Render(float r, float g, float b, float a)
 {
-    // 1) Начинаем новый список команд
+   
     m_commandAllocator->Reset();
     m_commandList->Reset(m_commandAllocator.Get(), m_pso.Get());
 
-    // 2) BackBuffer: Present -> RenderTarget
+   
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -151,41 +141,30 @@ void D3D12Context::Render(float r, float g, float b, float a)
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     m_commandList->ResourceBarrier(1, &barrier);
 
-    // 3) Берём RTV текущего backbuffer и DSV depth
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = GetCurrentBackBufferRTV();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = GetDepthStencilView();
 
-    // 4) Очищаем экран и depth
     float clearColor[4] = { r, g, b, a };
     m_commandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     m_commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    // 5) Куда рисовать
     m_commandList->OMSetRenderTargets(1, &rtv, TRUE, &dsv);
 
-    // 6) Viewport + Scissor
     D3D12_VIEWPORT vp = GetViewport();
     D3D12_RECT sc = GetScissorRect();
 
     m_commandList->RSSetViewports(1, &vp);
     m_commandList->RSSetScissorRects(1, &sc);
-
-    // 7) Root signature
     m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-    // 8) Подключаем SRV heap (текстуры)
+
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     m_commandList->SetDescriptorHeaps(1, heaps);
 
-    // 9) Обновляем constant buffer и биндим в root param 0 (b0)
+
     UpdateSceneConstants();
     m_commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress());
 
-    // 10) ВАЖНО ДЛЯ ВАРИАНТА A:
-    // root param 1 = SRV table, ставим НАЧАЛО heap.
-    // Тогда в шейдере:
-    //   t0 -> srv0 (TextureA)
-    //   t1 -> srv1 (TextureB)
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
 
     // 11) Геометрия
@@ -193,9 +172,6 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->IASetVertexBuffers(0, 1, &m_vbView);
     m_commandList->IASetIndexBuffer(&m_ibView);
 
-    // 12) Рисуем.
-    // Сабмеши оставляем только ради разных диапазонов индексов (материалы),
-    // но текстуру НЕ переключаем (переход всегда между t0 и t1).
     if (!m_submeshes.empty())
     {
         for (const auto& sm : m_submeshes)
@@ -218,11 +194,11 @@ void D3D12Context::Render(float r, float g, float b, float a)
         m_commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
     }
 
-    // 13) BackBuffer: RenderTarget -> Present
+   
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
     m_commandList->ResourceBarrier(1, &barrier);
 
-    // 14) Отправляем команды на GPU и показываем кадр
+    // Отправляем команды на GPU и показываем кадр
     m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(1, lists);
