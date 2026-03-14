@@ -131,8 +131,10 @@
     <ClCompile Include="CubeGeometry.cpp" />
     <ClCompile Include="D3D12Context.cpp" />
     <ClCompile Include="GameTimer.cpp" />
+    <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="InputDevice.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="tiny_obj_loader.cc" />
     <ClCompile Include="Vertex.cpp" />
     <ClCompile Include="Win32Window.cpp" />
@@ -142,13 +144,21 @@
     <ClInclude Include="CubeGeometry.h" />
     <ClInclude Include="D3D12Context.h" />
     <ClInclude Include="GameTimer.h" />
+    <ClInclude Include="GBuffer.h" />
     <ClInclude Include="InputDevice.h" />
+    <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="tiny_obj_loader.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="Win32Window.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="DeferredGeometry.hlsl">
+      <FileType>Document</FileType>
+    </None>
+    <None Include="DeferredLighting.hlsl">
+      <FileType>Document</FileType>
+    </None>
     <None Include="Shaders.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>

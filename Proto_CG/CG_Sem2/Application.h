@@ -3,7 +3,7 @@
 
 #include "Win32Window.h"
 #include "GameTimer.h"
-#include "D3D12Context.h"
+#include "RenderingSystem.h"
 #include "InputDevice.h"
 
 class Application
@@ -20,6 +20,6 @@ private:
 
     Win32Window  m_window;
     GameTimer    m_timer;
-    D3D12Context m_dx12;
+    RenderingSystem m_renderingSystem;
     InputDevice  m_input;
 };

@@ -22,15 +22,16 @@ bool Application::Initialize()
 
     m_window.SetInputDevice(&m_input);
 
-    if (!m_dx12.Initialize(m_window.GetHWND(), 1200, 1000))
+    if (!m_renderingSystem.Initialize(m_window.GetHWND(), 1200, 1000))
     {
         MessageBoxW(nullptr, L"DX12 Initialize FAILED (see Output window)", L"Error", MB_OK);
         return false;
     }
     
-    
-    m_dx12.SetUVTiling(4.0f, 4.0f);          
-    m_dx12.SetUVScrollSpeed(0.15f, 0.0f);
+    m_renderingSystem.SetTechnique(RenderingSystem::Technique::Deferred);
+    m_renderingSystem.SetUVTiling(4.0f, 4.0f);
+    m_renderingSystem.SetUVScrollSpeed(0.15f, 0.0f);
+    m_renderingSystem.SetClearColor(0.48f, 0.52f, 0.80f, 1.0f);
 
     m_timer.Reset();
     return true;
@@ -70,11 +71,11 @@ int Application::Run()
         m_input.ResetMouseDelta();
 
         // скорость для 
-        const float rotateSpeed = 0.005f; 
-        const float dollySpeed = 0.2f; 
+        const float rotateSpeed = 0.0035f;
+        const float dollySpeed = 1.5f;
 
 
-        m_dx12.UpdateCameraOrbit(
+        m_renderingSystem.UpdateCameraOrbit(
             deltaTime,
             rotateSpeed,
             dollySpeed,
@@ -83,8 +84,7 @@ int Application::Run()
             (float)mouseDeltaX,
             (float)mouseDeltaY);
 
-        m_dx12.SetTime(m_timer.TotalTime());
-
-        m_dx12.Render(0.48f, 0.52f, 0.80f, 1.0f);
+        m_renderingSystem.SetTime(m_timer.TotalTime());
+        m_renderingSystem.RenderFrame();
     }
 }

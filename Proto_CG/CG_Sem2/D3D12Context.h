@@ -43,11 +43,33 @@ public:
 
     void Render(float r, float g, float b, float a);
     void SetRotation(float t);
+    void BeginFrame(ID3D12PipelineState* initialState = nullptr);
+    void EndFrame();
+    void UpdateSceneConstants();
+    void DrawSceneGeometry(ID3D12GraphicsCommandList* commandList, UINT textureRootParameterIndex);
 
     void UpdateCameraOrbit(float deltaTime,
         float rotateSpeed, float dollySpeed,
         bool orbitRotate, bool dolly,
         float mouseDeltaX, float mouseDeltaY);
+
+    ID3D12Device* GetDevice() const;
+    ID3D12GraphicsCommandList* GetCommandList() const;
+    ID3D12DescriptorHeap* GetSceneSRVHeap() const;
+    ID3D12RootSignature* GetSceneRootSignature() const;
+    D3D12_GPU_VIRTUAL_ADDRESS GetSceneConstantBufferAddress() const;
+    D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentBackBufferRTV() const;
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDepthStencilView() const;
+    D3D12_VIEWPORT GetViewport() const;
+    D3D12_RECT GetScissorRect() const;
+    UINT GetWidth() const;
+    UINT GetHeight() const;
+    DirectX::XMFLOAT3 GetCameraPosition() const;
+    DirectX::XMFLOAT3 GetCameraTarget() const;
+    DirectX::XMFLOAT3 GetSceneBoundsMin() const;
+    DirectX::XMFLOAT3 GetSceneBoundsMax() const;
+    DirectX::XMFLOAT3 GetSceneCenter() const;
+    DirectX::XMFLOAT3 GetSceneExtents() const;
 
 private:
 
@@ -70,6 +92,7 @@ private:
     bool CreateConstantBuffer();
     bool CompileShaders();
     bool CreateTextureFromFile(const char* filePath, UINT srvIndex);
+    bool CreateSolidColorTexture(UINT32 rgba, UINT srvIndex);
     bool CreateSRVHeap(UINT numDescriptors);
 
     void UpdateCB();
@@ -122,13 +145,13 @@ private:
     float m_rotationT = 0.f;
 
     // обзор каемры
-    DirectX::XMFLOAT3 m_cameraTarget = { 0.0f, 0.2f, 0.0f };
-    float m_cameraDistance = 15.0f;   // растояние
+    DirectX::XMFLOAT3 m_cameraTarget = { 0.0f, 220.0f, 0.0f };
+    float m_cameraDistance = 1150.0f;
     float m_cameraYaw = 0.0f;
-    float m_cameraPitch = -0.5f;  // высота
+    float m_cameraPitch = -0.22f;
 
     // расположение камеры
-    XMFLOAT3 m_cameraPos = { 0.0f, 5.0f, -20.0f };
+    XMFLOAT3 m_cameraPos = { 0.0f, 420.0f, -1150.0f };
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     UINT m_srvDescriptorSize = 0;
@@ -141,4 +164,6 @@ private:
 
     // материал 
     std::vector<UINT> m_materialToSrv;
+    DirectX::XMFLOAT3 m_sceneBoundsMin = { -1.0f, -1.0f, -1.0f };
+    DirectX::XMFLOAT3 m_sceneBoundsMax = { 1.0f, 1.0f, 1.0f };
 };

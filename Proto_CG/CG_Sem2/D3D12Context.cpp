@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <unordered_map>
 
 #pragma comment(lib,"d3d12.lib")
 #pragma comment(lib,"dxgi.lib")
@@ -18,6 +19,8 @@ using namespace DirectX;
 // инициализация 
 bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
 {
+    static constexpr UINT MaxSrvCount = 128;
+
     m_width = width;
     m_height = height;
 
@@ -31,7 +34,6 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     if (!CreateRootSignature()) return false;
     if (!CreatePipelineState()) return false;
 
-    const UINT MaxSrvCount = 8;
     if (!CreateSRVHeap(MaxSrvCount)) return false;
 
     // ===============================
@@ -44,12 +46,10 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     std::string exeDir = exeDirA;
 
     std::string modelsDir = exeDir + "models\\";
-    std::string objPath = modelsDir + "Y02KIUZDQIQUI871CWZ8ZL02C.obj";
+    std::string objPath = modelsDir + "sponza.obj";
     std::string mtlDir = modelsDir;
 
     // ДВЕ ТЕКСТУРЫ ДЛЯ СИНУС-ПЕРЕХОДА
-    std::string texA = modelsDir + "texture.jpg";
-    std::string texB = modelsDir + "grjfg.jpg";
 
     // ===============================
     // Reset командного листа
@@ -60,10 +60,7 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     // ===============================
     // 1. Грузим две текстуры строго в srv0 и srv1
     // ===============================
-    if (!CreateTextureFromFile(texA.c_str(), 0))
-        return false;
-
-    if (!CreateTextureFromFile(texB.c_str(), 1))
+    if (!CreateSolidColorTexture(0xffffffffu, 0))
         return false;
 
     // ===============================
@@ -155,10 +152,8 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->ResourceBarrier(1, &barrier);
 
     // 3) Берём RTV текущего backbuffer и DSV depth
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += SIZE_T(m_frameIndex) * SIZE_T(m_rtvDescriptorSize);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = GetCurrentBackBufferRTV();
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = GetDepthStencilView();
 
     // 4) Очищаем экран и depth
     float clearColor[4] = { r, g, b, a };
@@ -169,19 +164,8 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->OMSetRenderTargets(1, &rtv, TRUE, &dsv);
 
     // 6) Viewport + Scissor
-    D3D12_VIEWPORT vp{};
-    vp.TopLeftX = 0.f;
-    vp.TopLeftY = 0.f;
-    vp.Width = (float)m_width;
-    vp.Height = (float)m_height;
-    vp.MinDepth = 0.f;
-    vp.MaxDepth = 1.f;
-
-    D3D12_RECT sc{};
-    sc.left = 0;
-    sc.top = 0;
-    sc.right = (LONG)m_width;
-    sc.bottom = (LONG)m_height;
+    D3D12_VIEWPORT vp = GetViewport();
+    D3D12_RECT sc = GetScissorRect();
 
     m_commandList->RSSetViewports(1, &vp);
     m_commandList->RSSetScissorRects(1, &sc);
@@ -194,8 +178,8 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->SetDescriptorHeaps(1, heaps);
 
     // 9) Обновляем constant buffer и биндим в root param 0 (b0)
-    UpdateCB();
-    m_commandList->SetGraphicsRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+    UpdateSceneConstants();
+    m_commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress());
 
     // 10) ВАЖНО ДЛЯ ВАРИАНТА A:
     // root param 1 = SRV table, ставим НАЧАЛО heap.
@@ -203,7 +187,6 @@ void D3D12Context::Render(float r, float g, float b, float a)
     //   t0 -> srv0 (TextureA)
     //   t1 -> srv1 (TextureB)
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-    m_commandList->SetGraphicsRootDescriptorTable(1, baseGpu);
 
     // 11) Геометрия
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -217,6 +200,10 @@ void D3D12Context::Render(float r, float g, float b, float a)
     {
         for (const auto& sm : m_submeshes)
         {
+            D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
+            textureHandle.ptr += SIZE_T(sm.SrvIndex) * SIZE_T(m_srvDescriptorSize);
+            m_commandList->SetGraphicsRootDescriptorTable(1, textureHandle);
+
             m_commandList->DrawIndexedInstanced(
                 sm.IndexCount,
                 1,
@@ -227,6 +214,7 @@ void D3D12Context::Render(float r, float g, float b, float a)
     }
     else
     {
+        m_commandList->SetGraphicsRootDescriptorTable(1, baseGpu);
         m_commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
     }
 
@@ -261,8 +249,8 @@ void D3D12Context::UpdateCB()
         XMMatrixPerspectiveFovLH(
             XM_PIDIV4,
             (float)m_width / (float)m_height,
-            0.1f,
-            1000.0f);
+            1.0f,
+            20000.0f);
 
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&m_cbData.View, XMMatrixTranspose(view));
@@ -466,6 +454,120 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 }
 
 // создание устройства
+bool D3D12Context::CreateSolidColorTexture(UINT32 rgba, UINT srvIndex)
+{
+    if (!m_device || !m_commandList || !m_srvHeap)
+    {
+        OutputDebugStringA("CreateSolidColorTexture: device/commandList/srvHeap is null\n");
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC texDesc{};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = 1;
+    texDesc.Height = 1;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    ComPtr<ID3D12Resource> texture;
+    HRESULT hr = m_device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&texture));
+
+    if (FAILED(hr) || !texture)
+    {
+        OutputDebugStringA("CreateSolidColorTexture: default texture create failed\n");
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    ComPtr<ID3D12Resource> upload;
+    hr = m_device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&upload));
+
+    if (FAILED(hr) || !upload)
+    {
+        OutputDebugStringA("CreateSolidColorTexture: upload texture create failed\n");
+        return false;
+    }
+
+    void* mapped = nullptr;
+    hr = upload->Map(0, nullptr, &mapped);
+    if (FAILED(hr) || !mapped)
+    {
+        OutputDebugStringA("CreateSolidColorTexture: upload map failed\n");
+        return false;
+    }
+
+    std::memcpy(mapped, &rgba, sizeof(rgba));
+    upload->Unmap(0, nullptr);
+
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = texture.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = upload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    src.PlacedFootprint.Footprint.Width = 1;
+    src.PlacedFootprint.Footprint.Height = 1;
+    src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.RowPitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+
+    m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = texture.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_commandList->ResourceBarrier(1, &barrier);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    cpuHandle.ptr += SIZE_T(srvIndex) * SIZE_T(m_srvDescriptorSize);
+    m_device->CreateShaderResourceView(texture.Get(), &srv, cpuHandle);
+
+    m_textures.push_back(texture);
+    m_textureUploads.push_back(upload);
+    return true;
+}
+
 bool D3D12Context::CreateDevice()
 {
 #if defined(_DEBUG)
@@ -636,18 +738,26 @@ bool D3D12Context::CompileShaders()
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
 
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t exeDir[MAX_PATH];
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
 
-    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
     if (!lastSlash)
         return false;
     *(lastSlash + 1) = 0;
 
-    wcscat_s(exePath, L"Shaders.hlsl");
+    wchar_t shaderPath[MAX_PATH];
+    wcscpy_s(shaderPath, exeDir);
+    wcscat_s(shaderPath, L"..\\..\\CG_Sem2\\Shaders.hlsl");
+
+    if (GetFileAttributesW(shaderPath) == INVALID_FILE_ATTRIBUTES)
+    {
+        wcscpy_s(shaderPath, exeDir);
+        wcscat_s(shaderPath, L"Shaders.hlsl");
+    }
 
     HRESULT hr = D3DCompileFromFile(
-        exePath,
+        shaderPath,
         nullptr,
         D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "VSMain",
@@ -661,7 +771,7 @@ bool D3D12Context::CompileShaders()
         return false;
 
     hr = D3DCompileFromFile(
-        exePath,
+        shaderPath,
         nullptr,
         D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "PSMain",
@@ -698,7 +808,7 @@ bool D3D12Context::CreateSRVHeap(UINT numDescriptors)
 // массив для текстур 
 bool D3D12Context::CreateRootSignature()
 {
-    const UINT MaxSrvCount = 8;
+    const UINT MaxSrvCount = 128;
 
     // диапазон
     D3D12_DESCRIPTOR_RANGE srvRange{};
@@ -897,6 +1007,9 @@ bool D3D12Context::CreateGeometry()
     m_ibView.SizeInBytes = ibSize;
     m_ibView.Format = DXGI_FORMAT_R16_UINT;
 
+    m_sceneBoundsMin = XMFLOAT3(-1.0f, -1.0f, -1.0f);
+    m_sceneBoundsMax = XMFLOAT3(1.0f, 1.0f, 1.0f);
+
     return true;
 }
 
@@ -932,6 +1045,64 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
     {
         // может быть пустая строка
         m_materialDiffusePaths[i] = materials[i].diffuse_texname;
+    }
+
+    m_materialToSrv.clear();
+    m_materialToSrv.resize(materials.size(), 0);
+
+    UINT nextSrvIndex = 1;
+    std::unordered_map<std::string, UINT> texturePathToSrv;
+
+    for (size_t i = 0; i < m_materialDiffusePaths.size(); ++i)
+    {
+        const std::string& textureName = m_materialDiffusePaths[i];
+        if (textureName.empty())
+        {
+            continue;
+        }
+
+        std::string texturePath = textureName;
+        const bool looksAbsolute =
+            (textureName.size() > 1 && textureName[1] == ':') ||
+            (!textureName.empty() && (textureName[0] == '\\' || textureName[0] == '/'));
+
+        if (!looksAbsolute)
+        {
+            texturePath = std::string(mtlBaseDir) + textureName;
+        }
+
+        if (GetFileAttributesA(texturePath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            const size_t slashPos = textureName.find_last_of("\\/");
+            if (slashPos != std::string::npos && slashPos + 1 < textureName.size())
+            {
+                texturePath = std::string(mtlBaseDir) + textureName.substr(slashPos + 1);
+            }
+        }
+
+        auto existing = texturePathToSrv.find(texturePath);
+        if (existing != texturePathToSrv.end())
+        {
+            m_materialToSrv[i] = existing->second;
+            continue;
+        }
+
+        if (nextSrvIndex >= 128)
+        {
+            OutputDebugStringA("Reached SRV heap limit while loading OBJ textures. Using fallback texture.\n");
+            break;
+        }
+
+        if (CreateTextureFromFile(texturePath.c_str(), nextSrvIndex))
+        {
+            texturePathToSrv.emplace(texturePath, nextSrvIndex);
+            m_materialToSrv[i] = nextSrvIndex;
+            ++nextSrvIndex;
+        }
+        else
+        {
+            OutputDebugStringA(("Failed to load material texture, using fallback: " + texturePath + "\n").c_str());
+        }
     }
 
     struct V { XMFLOAT3 p; XMFLOAT3 n; XMFLOAT2 uv; };
@@ -1016,6 +1187,26 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
         return false;
     }
 
+    float minX = vertices[0].p.x;
+    float minY = vertices[0].p.y;
+    float minZ = vertices[0].p.z;
+    float maxX = vertices[0].p.x;
+    float maxY = vertices[0].p.y;
+    float maxZ = vertices[0].p.z;
+
+    for (const auto& v : vertices)
+    {
+        minX = (v.p.x < minX) ? v.p.x : minX;
+        minY = (v.p.y < minY) ? v.p.y : minY;
+        minZ = (v.p.z < minZ) ? v.p.z : minZ;
+        maxX = (v.p.x > maxX) ? v.p.x : maxX;
+        maxY = (v.p.y > maxY) ? v.p.y : maxY;
+        maxZ = (v.p.z > maxZ) ? v.p.z : maxZ;
+    }
+
+    m_sceneBoundsMin = XMFLOAT3(minX, minY, minZ);
+    m_sceneBoundsMax = XMFLOAT3(maxX, maxY, maxZ);
+
     // сборка индекс буфера
     m_submeshes.clear();
 
@@ -1034,6 +1225,10 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
         sm.IndexCount = (UINT)src.size();
         sm.MaterialId = (bucket == 0) ? -1 : ((int)bucket - 1);
         sm.SrvIndex = 0;
+        if (sm.MaterialId >= 0 && (size_t)sm.MaterialId < m_materialToSrv.size())
+        {
+            sm.SrvIndex = m_materialToSrv[sm.MaterialId];
+        }
 
         indices.insert(indices.end(), src.begin(), src.end());
         runningStart += sm.IndexCount;
@@ -1178,6 +1373,177 @@ bool D3D12Context::CreateConstantBuffer()
 
 
 // тайлинг и офсет 
+void D3D12Context::BeginFrame(ID3D12PipelineState* initialState)
+{
+    m_commandAllocator->Reset();
+    m_commandList->Reset(m_commandAllocator.Get(), initialState);
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_backBuffers[m_frameIndex].Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    m_commandList->ResourceBarrier(1, &barrier);
+}
+
+void D3D12Context::EndFrame()
+{
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_backBuffers[m_frameIndex].Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    m_commandList->ResourceBarrier(1, &barrier);
+
+    m_commandList->Close();
+    ID3D12CommandList* lists[] = { m_commandList.Get() };
+    m_commandQueue->ExecuteCommandLists(1, lists);
+    m_swapChain->Present(1, 0);
+    WaitForGPU();
+    m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+}
+
+void D3D12Context::UpdateSceneConstants()
+{
+    UpdateCB();
+}
+
+void D3D12Context::DrawSceneGeometry(ID3D12GraphicsCommandList* commandList, UINT textureRootParameterIndex)
+{
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_vbView);
+    commandList->IASetIndexBuffer(&m_ibView);
+
+    if (!m_submeshes.empty())
+    {
+        for (const auto& sm : m_submeshes)
+        {
+            D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
+            textureHandle.ptr += SIZE_T(sm.SrvIndex) * SIZE_T(m_srvDescriptorSize);
+            commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, textureHandle);
+            commandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
+        }
+    }
+    else
+    {
+        commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, baseGpu);
+        commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
+    }
+}
+
+ID3D12Device* D3D12Context::GetDevice() const
+{
+    return m_device.Get();
+}
+
+ID3D12GraphicsCommandList* D3D12Context::GetCommandList() const
+{
+    return m_commandList.Get();
+}
+
+ID3D12DescriptorHeap* D3D12Context::GetSceneSRVHeap() const
+{
+    return m_srvHeap.Get();
+}
+
+ID3D12RootSignature* D3D12Context::GetSceneRootSignature() const
+{
+    return m_rootSignature.Get();
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS D3D12Context::GetSceneConstantBufferAddress() const
+{
+    return m_constantBuffer->GetGPUVirtualAddress();
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Context::GetCurrentBackBufferRTV() const
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += SIZE_T(m_frameIndex) * SIZE_T(m_rtvDescriptorSize);
+    return rtv;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Context::GetDepthStencilView() const
+{
+    return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+}
+
+D3D12_VIEWPORT D3D12Context::GetViewport() const
+{
+    D3D12_VIEWPORT vp{};
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width = static_cast<float>(m_width);
+    vp.Height = static_cast<float>(m_height);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    return vp;
+}
+
+D3D12_RECT D3D12Context::GetScissorRect() const
+{
+    D3D12_RECT sc{};
+    sc.left = 0;
+    sc.top = 0;
+    sc.right = static_cast<LONG>(m_width);
+    sc.bottom = static_cast<LONG>(m_height);
+    return sc;
+}
+
+UINT D3D12Context::GetWidth() const
+{
+    return m_width;
+}
+
+UINT D3D12Context::GetHeight() const
+{
+    return m_height;
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetCameraPosition() const
+{
+    return m_cameraPos;
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetCameraTarget() const
+{
+    return m_cameraTarget;
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetSceneBoundsMin() const
+{
+    return m_sceneBoundsMin;
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetSceneBoundsMax() const
+{
+    return m_sceneBoundsMax;
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetSceneCenter() const
+{
+    return XMFLOAT3(
+        0.5f * (m_sceneBoundsMin.x + m_sceneBoundsMax.x),
+        0.5f * (m_sceneBoundsMin.y + m_sceneBoundsMax.y),
+        0.5f * (m_sceneBoundsMin.z + m_sceneBoundsMax.z));
+}
+
+DirectX::XMFLOAT3 D3D12Context::GetSceneExtents() const
+{
+    return XMFLOAT3(
+        0.5f * (m_sceneBoundsMax.x - m_sceneBoundsMin.x),
+        0.5f * (m_sceneBoundsMax.y - m_sceneBoundsMin.y),
+        0.5f * (m_sceneBoundsMax.z - m_sceneBoundsMin.z));
+}
+
 void D3D12Context::SetTime(float t)
 {
     m_time = t;
