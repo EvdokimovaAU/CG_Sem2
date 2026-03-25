@@ -9,6 +9,7 @@
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
+#include <filesystem>
 
 #pragma comment(lib,"d3d12.lib")
 #pragma comment(lib,"dxgi.lib")
@@ -44,8 +45,12 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     std::string exeDir = exeDirA;
 
     std::string modelsDir = exeDir + "models\\";
-    std::string objPath = modelsDir + "sponza.obj";
+    std::string objPath = modelsDir + "high plane.obj";
     std::string mtlDir = modelsDir;
+    std::string baseColorPath = modelsDir + "textures\\New_Graph_basecolor.jpg";
+    std::string displacementPath = modelsDir + "textures\\New_Graph_height.jpg";
+    std::string normalMapPath = modelsDir + "textures\\New_Graph_normal.jpg";
+    std::string roughnessPath = modelsDir + "textures\\New_Graph_roughness.jpg";
 
 
   
@@ -75,6 +80,45 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
         sm.SrvIndex = 0;
         m_submeshes.push_back(sm);
     }
+
+    m_baseColorSrvIndex = 125;
+    if (!CreateTextureFromFile(baseColorPath.c_str(), m_baseColorSrvIndex))
+    {
+        m_baseColorSrvIndex = 0;
+    }
+
+    m_displacementSrvIndex = 127;
+    if (!CreateTextureFromFile(displacementPath.c_str(), m_displacementSrvIndex))
+    {
+        m_displacementSrvIndex = 0;
+    }
+
+    m_normalMapSrvIndex = 126;
+    if (!CreateTextureFromFile(normalMapPath.c_str(), m_normalMapSrvIndex))
+    {
+        m_normalMapSrvIndex = 0;
+    }
+
+    m_roughnessSrvIndex = 124;
+    if (!CreateTextureFromFile(roughnessPath.c_str(), m_roughnessSrvIndex))
+    {
+        m_roughnessSrvIndex = 0;
+    }
+
+    if (m_baseColorSrvIndex != 0)
+    {
+        for (auto& sm : m_submeshes)
+        {
+            sm.SrvIndex = m_baseColorSrvIndex;
+        }
+    }
+
+    const XMFLOAT3 sceneCenter = GetSceneCenter();
+    const XMFLOAT3 sceneExtents = GetSceneExtents();
+    m_cameraTarget = sceneCenter;
+    m_cameraDistance = (std::max)(25.0f, (sceneExtents.x + sceneExtents.y + sceneExtents.z) * 1.35f);
+    m_cameraYaw = 0.0f;
+    m_cameraPitch = -0.75f;
 
    // закрытие списка команд
     m_commandList->Close();
@@ -166,9 +210,18 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress());
 
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE displacementHandle = baseGpu;
+    displacementHandle.ptr += SIZE_T(m_displacementSrvIndex) * SIZE_T(m_srvDescriptorSize);
+    m_commandList->SetGraphicsRootDescriptorTable(2, displacementHandle);
+    D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
+    normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
+    m_commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+    D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
+    roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
+    m_commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
 
     // 11) Геометрия
-    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vbView);
     m_commandList->IASetIndexBuffer(&m_ibView);
 
@@ -243,6 +296,7 @@ void D3D12Context::UpdateCB()
     );
 
     m_cbData.TimeParams = XMFLOAT4(m_time, 1.0f, 0.0f, 0.0f);
+    m_cbData.TessellationParams = XMFLOAT4(0.35f, 20.0f, 1.5f, 320.0f);
 
     memcpy(m_cbMappedData, &m_cbData, sizeof(PerObjectCB));
 }
@@ -402,7 +456,9 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
     barrier.Transition.pResource = texture.Get();
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.StateAfter =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     m_commandList->ResourceBarrier(1, &barrier);
 
@@ -526,7 +582,9 @@ bool D3D12Context::CreateSolidColorTexture(UINT32 rgba, UINT srvIndex)
     barrier.Transition.pResource = texture.Get();
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.StateAfter =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     m_commandList->ResourceBarrier(1, &barrier);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -750,6 +808,34 @@ bool D3D12Context::CompileShaders()
         shaderPath,
         nullptr,
         D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "HSMain",
+        "hs_5_0",
+        flags,
+        0,
+        &m_hs,
+        nullptr);
+
+    if (FAILED(hr))
+        return false;
+
+    hr = D3DCompileFromFile(
+        shaderPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "DSMain",
+        "ds_5_0",
+        flags,
+        0,
+        &m_ds,
+        nullptr);
+
+    if (FAILED(hr))
+        return false;
+
+    hr = D3DCompileFromFile(
+        shaderPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "PSMain",
         "ps_5_0",
         flags,
@@ -789,14 +875,38 @@ bool D3D12Context::CreateRootSignature()
     // диапазон
     D3D12_DESCRIPTOR_RANGE srvRange{};
     srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = MaxSrvCount;
+    srvRange.NumDescriptors = 1;
     srvRange.BaseShaderRegister = 0;
     srvRange.RegisterSpace = 0;
     srvRange.OffsetInDescriptorsFromTableStart =
         D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     // передача 2 параметров в шейдер
-    D3D12_ROOT_PARAMETER rootParams[2]{};
+    D3D12_DESCRIPTOR_RANGE displacementRange{};
+    displacementRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    displacementRange.NumDescriptors = 1;
+    displacementRange.BaseShaderRegister = 1;
+    displacementRange.RegisterSpace = 0;
+    displacementRange.OffsetInDescriptorsFromTableStart =
+        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE normalRange{};
+    normalRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    normalRange.NumDescriptors = 1;
+    normalRange.BaseShaderRegister = 2;
+    normalRange.RegisterSpace = 0;
+    normalRange.OffsetInDescriptorsFromTableStart =
+        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE roughnessRange{};
+    roughnessRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    roughnessRange.NumDescriptors = 1;
+    roughnessRange.BaseShaderRegister = 3;
+    roughnessRange.RegisterSpace = 0;
+    roughnessRange.OffsetInDescriptorsFromTableStart =
+        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParams[5]{};
 
     // константный буфер
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -812,6 +922,27 @@ bool D3D12Context::CreateRootSignature()
     rootParams[1].ShaderVisibility =
         D3D12_SHADER_VISIBILITY_PIXEL;
 
+    rootParams[2].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[2].DescriptorTable.pDescriptorRanges = &displacementRange;
+    rootParams[2].ShaderVisibility =
+        D3D12_SHADER_VISIBILITY_DOMAIN;
+
+    rootParams[3].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[3].DescriptorTable.pDescriptorRanges = &normalRange;
+    rootParams[3].ShaderVisibility =
+        D3D12_SHADER_VISIBILITY_PIXEL;
+
+    rootParams[4].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[4].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[4].DescriptorTable.pDescriptorRanges = &roughnessRange;
+    rootParams[4].ShaderVisibility =
+        D3D12_SHADER_VISIBILITY_PIXEL;
+
     // правила чтения текстуры
     D3D12_STATIC_SAMPLER_DESC staticSampler{};
     staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR; // сглаживание
@@ -821,11 +952,11 @@ bool D3D12Context::CreateRootSignature()
     staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     staticSampler.ShaderRegister = 0;
     staticSampler.ShaderVisibility =
-        D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_SHADER_VISIBILITY_ALL;
 
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc{};
-    rsDesc.NumParameters = 2;
+    rsDesc.NumParameters = 5;
     rsDesc.pParameters = rootParams;
     rsDesc.NumStaticSamplers = 1;
     rsDesc.pStaticSamplers = &staticSampler;
@@ -871,8 +1002,10 @@ bool D3D12Context::CreatePipelineState()
     pso.InputLayout = { layout, _countof(layout) };
     pso.pRootSignature = m_rootSignature.Get();
     pso.VS = { m_vs->GetBufferPointer(), m_vs->GetBufferSize() };
+    pso.HS = { m_hs->GetBufferPointer(), m_hs->GetBufferSize() };
+    pso.DS = { m_ds->GetBufferPointer(), m_ds->GetBufferSize() };
     pso.PS = { m_ps->GetBufferPointer(), m_ps->GetBufferSize() };
-    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     pso.SampleMask = UINT_MAX;
 
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -1037,26 +1170,36 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
             continue;
         }
 
-        std::string texturePath = textureName;
-        const bool looksAbsolute =
-            (textureName.size() > 1 && textureName[1] == ':') ||
-            (!textureName.empty() && (textureName[0] == '\\' || textureName[0] == '/'));
+        namespace fs = std::filesystem;
+        fs::path texturePath(textureName);
+        std::error_code ec;
 
-        if (!looksAbsolute)
+        if (!texturePath.is_absolute())
         {
-            texturePath = std::string(mtlBaseDir) + textureName;
+            texturePath = fs::path(mtlBaseDir) / texturePath;
         }
+        texturePath = texturePath.lexically_normal();
 
-        if (GetFileAttributesA(texturePath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        if (!fs::exists(texturePath, ec))
         {
-            const size_t slashPos = textureName.find_last_of("\\/");
-            if (slashPos != std::string::npos && slashPos + 1 < textureName.size())
+            const fs::path fileName = fs::path(textureName).filename();
+            const fs::path modelsDir = fs::path(mtlBaseDir);
+            const fs::path textureDirCandidate = modelsDir / "textures" / fileName;
+            const fs::path localCandidate = modelsDir / fileName;
+
+            if (fs::exists(textureDirCandidate, ec))
             {
-                texturePath = std::string(mtlBaseDir) + textureName.substr(slashPos + 1);
+                texturePath = textureDirCandidate;
+            }
+            else if (fs::exists(localCandidate, ec))
+            {
+                texturePath = localCandidate;
             }
         }
 
-        auto existing = texturePathToSrv.find(texturePath);
+        const std::string texturePathString = texturePath.string();
+
+        auto existing = texturePathToSrv.find(texturePathString);
         if (existing != texturePathToSrv.end())
         {
             m_materialToSrv[i] = existing->second;
@@ -1069,15 +1212,15 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
             break;
         }
 
-        if (CreateTextureFromFile(texturePath.c_str(), nextSrvIndex))
+        if (CreateTextureFromFile(texturePathString.c_str(), nextSrvIndex))
         {
-            texturePathToSrv.emplace(texturePath, nextSrvIndex);
+            texturePathToSrv.emplace(texturePathString, nextSrvIndex);
             m_materialToSrv[i] = nextSrvIndex;
             ++nextSrvIndex;
         }
         else
         {
-            OutputDebugStringA(("Failed to load material texture, using fallback: " + texturePath + "\n").c_str());
+            OutputDebugStringA(("Failed to load material texture, using fallback: " + texturePathString + "\n").c_str());
         }
     }
 
@@ -1337,6 +1480,8 @@ bool D3D12Context::CreateConstantBuffer()
 
     XMMATRIX I = XMMatrixIdentity();
     m_cbData.UVTransform = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+    m_cbData.TimeParams = XMFLOAT4(0.0f, 1.0f, 0.0f, 0.0f);
+    m_cbData.TessellationParams = XMFLOAT4(0.35f, 20.0f, 1.5f, 320.0f);
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(I));
 
     D3D12_RANGE readRange{ 0,0 };
@@ -1386,7 +1531,10 @@ void D3D12Context::UpdateSceneConstants()
     UpdateCB();
 }
 
-void D3D12Context::DrawSceneGeometry(ID3D12GraphicsCommandList* commandList, UINT textureRootParameterIndex)
+void D3D12Context::DrawSceneGeometry(
+    ID3D12GraphicsCommandList* commandList,
+    UINT textureRootParameterIndex,
+    UINT displacementRootParameterIndex)
 {
     if (commandList == nullptr)
     {
@@ -1394,9 +1542,24 @@ void D3D12Context::DrawSceneGeometry(ID3D12GraphicsCommandList* commandList, UIN
     }
 
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     commandList->IASetVertexBuffers(0, 1, &m_vbView);
     commandList->IASetIndexBuffer(&m_ibView);
+
+    if (displacementRootParameterIndex != UINT_MAX)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE displacementHandle = baseGpu;
+        displacementHandle.ptr += SIZE_T(m_displacementSrvIndex) * SIZE_T(m_srvDescriptorSize);
+        commandList->SetGraphicsRootDescriptorTable(displacementRootParameterIndex, displacementHandle);
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
+    normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
+    commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
+    roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
+    commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
 
     if (!m_submeshes.empty())
     {

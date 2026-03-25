@@ -87,6 +87,8 @@ private:
     UINT m_height = 0;
 
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryHS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryDS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingPS;

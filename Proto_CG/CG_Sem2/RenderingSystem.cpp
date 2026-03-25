@@ -79,6 +79,8 @@ void RenderingSystem::Shutdown()
     m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
     m_deferredGeometryVS.Reset();
+    m_deferredGeometryHS.Reset();
+    m_deferredGeometryDS.Reset();
     m_deferredGeometryPS.Reset();
     m_deferredLightingVS.Reset();
     m_deferredLightingPS.Reset();
@@ -201,7 +203,7 @@ void RenderingSystem::RenderOpaqueStage()
 
     m_context.UpdateSceneConstants();
     commandList->SetGraphicsRootConstantBufferView(0, m_context.GetSceneConstantBufferAddress());
-    m_context.DrawSceneGeometry(commandList, 1);
+    m_context.DrawSceneGeometry(commandList, 1, 2);
 
     m_gbuffer.EndGeometryPass(commandList);
 }
@@ -274,6 +276,36 @@ bool RenderingSystem::CompileDeferredShaders()
         flags,
         0,
         &m_deferredGeometryVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        geometryPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "HSMain",
+        "hs_5_0",
+        flags,
+        0,
+        &m_deferredGeometryHS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        geometryPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "DSMain",
+        "ds_5_0",
+        flags,
+        0,
+        &m_deferredGeometryDS,
         nullptr);
     if (FAILED(hr))
     {
@@ -453,8 +485,10 @@ bool RenderingSystem::CreateDeferredGeometryPipeline()
     pso.InputLayout = { layout, _countof(layout) };
     pso.pRootSignature = m_context.GetSceneRootSignature();
     pso.VS = { m_deferredGeometryVS->GetBufferPointer(), m_deferredGeometryVS->GetBufferSize() };
+    pso.HS = { m_deferredGeometryHS->GetBufferPointer(), m_deferredGeometryHS->GetBufferSize() };
+    pso.DS = { m_deferredGeometryDS->GetBufferPointer(), m_deferredGeometryDS->GetBufferSize() };
     pso.PS = { m_deferredGeometryPS->GetBufferPointer(), m_deferredGeometryPS->GetBufferSize() };
-    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     pso.SampleMask = UINT_MAX;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -644,28 +678,20 @@ void RenderingSystem::UpdateLightingConstants()
     const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
     const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
     const float dominantExtent = (std::max)(sceneExtents.x, (std::max)(sceneExtents.y, sceneExtents.z));
-    const float pointRange = (std::max)(dominantExtent * 0.65f, 600.0f);
+    const float pointRange = (std::max)(dominantExtent * 0.95f, 900.0f);
     const float spotRange = (std::max)(dominantExtent * 0.90f, 900.0f);
 
-    cb.LightDirection = XMFLOAT4(-0.4f, -1.0f, -0.2f, 0.0f);
-    cb.LightColor = XMFLOAT4(0.92f, 0.91f, 0.89f, 0.22f);
-    cb.AmbientColor = XMFLOAT4(0.010f, 0.010f, 0.012f, 1.0f);
-    cb.LightCounts = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+    cb.LightDirection = XMFLOAT4(0.88f, -1.0f, -0.34f, 0.0f);
+    cb.LightColor = XMFLOAT4(1.00f, 0.95f, 0.88f, 3.40f);
+    cb.AmbientColor = XMFLOAT4(0.09f, 0.10f, 0.12f, 1.0f);
+    cb.LightCounts = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
 
     cb.PointLightPositionRange[0] = XMFLOAT4(
-        sceneCenter.x - sceneExtents.x * 0.35f,
-        sceneCenter.y + sceneExtents.y * 0.25f,
-        sceneCenter.z - sceneExtents.z * 0.10f,
+        sceneCenter.x + sceneExtents.x * 1.80f,
+        sceneCenter.y + sceneExtents.y * 1.25f,
+        sceneCenter.z - sceneExtents.z * 1.35f,
         pointRange);
-    cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 7.50f);
-
-    cb.SpotLightPositionRange[0] = XMFLOAT4(
-        sceneCenter.x + sceneExtents.x * 0.28f,
-        sceneCenter.y + sceneExtents.y * 0.75f,
-        sceneCenter.z - sceneExtents.z * 0.25f,
-        spotRange);
-    cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.22f, -0.95f, 0.18f, 0.82f);
-    cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 8.00f);
+    cb.PointLightColorIntensity[0] = XMFLOAT4(1.00f, 0.94f, 0.86f, 2.10f);
     cb.ScreenSize = XMFLOAT4(
         static_cast<float>(m_width),
         static_cast<float>(m_height),

@@ -29,8 +29,8 @@ bool Application::Initialize()
     }
     
     m_renderingSystem.SetTechnique(RenderingSystem::Technique::Deferred);
-    m_renderingSystem.SetUVTiling(4.0f, 4.0f);
-    m_renderingSystem.SetUVScrollSpeed(0.15f, 0.0f);
+    m_renderingSystem.SetUVTiling(1.0f, 1.0f);
+    m_renderingSystem.SetUVScrollSpeed(0.0f, 0.0f);
     m_renderingSystem.SetClearColor(0.48f, 0.52f, 0.80f, 1.0f);
 
     m_timer.Reset();

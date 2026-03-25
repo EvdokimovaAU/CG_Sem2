@@ -20,6 +20,7 @@ struct PerObjectCB
     XMFLOAT4X4 Proj;
     XMFLOAT4 UVTransform; // для тайлинга и офсета 
     XMFLOAT4 TimeParams;
+    XMFLOAT4 TessellationParams;
 };
 
 // кусок модели 1 матреиалом
@@ -46,7 +47,10 @@ public:
     void BeginFrame(ID3D12PipelineState* initialState = nullptr);
     void EndFrame();
     void UpdateSceneConstants();
-    void DrawSceneGeometry(ID3D12GraphicsCommandList* commandList, UINT textureRootParameterIndex);
+    void DrawSceneGeometry(
+        ID3D12GraphicsCommandList* commandList,
+        UINT textureRootParameterIndex,
+        UINT displacementRootParameterIndex = UINT_MAX);
 
     void UpdateCameraOrbit(float deltaTime,
         float rotateSpeed, float dollySpeed,
@@ -129,6 +133,8 @@ private:
     ComPtr<ID3D12PipelineState> m_pso;
 
     ComPtr<ID3DBlob> m_vs;
+    ComPtr<ID3DBlob> m_hs;
+    ComPtr<ID3DBlob> m_ds;
     ComPtr<ID3DBlob> m_ps;
 
     ComPtr<ID3D12Resource> m_vertexBuffer;
@@ -166,4 +172,8 @@ private:
     std::vector<UINT> m_materialToSrv;
     DirectX::XMFLOAT3 m_sceneBoundsMin = { -1.0f, -1.0f, -1.0f };
     DirectX::XMFLOAT3 m_sceneBoundsMax = { 1.0f, 1.0f, 1.0f };
+    UINT m_displacementSrvIndex = 0;
+    UINT m_normalMapSrvIndex = 0;
+    UINT m_baseColorSrvIndex = 0;
+    UINT m_roughnessSrvIndex = 0;
 };
