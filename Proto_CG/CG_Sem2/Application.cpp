@@ -57,6 +57,22 @@ int Application::Run()
             continue;
         }
 
+        const bool scene1Down = m_input.IsKeyDown('1');
+        const bool scene2Down = m_input.IsKeyDown('2');
+
+        if (scene1Down && !m_scene1WasDown)
+        {
+            m_renderingSystem.LoadScene(RenderingSystem::Scene::HighPlane);
+        }
+
+        if (scene2Down && !m_scene2WasDown)
+        {
+            m_renderingSystem.LoadScene(RenderingSystem::Scene::Sponza);
+        }
+
+        m_scene1WasDown = scene1Down;
+        m_scene2WasDown = scene2Down;
+
         m_timer.Tick();
         float deltaTime = m_timer.DeltaTime();
 

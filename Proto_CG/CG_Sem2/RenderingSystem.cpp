@@ -63,6 +63,11 @@ bool RenderingSystem::Initialize(HWND hwnd, UINT width, UINT height)
 
     return InitializeDeferredResources();
 }
+
+bool RenderingSystem::LoadScene(Scene scene)
+{
+    return m_context.LoadScene(scene);
+}
 // корректное завершение рендера и очистка памяти
 void RenderingSystem::Shutdown()
 {
@@ -71,13 +76,21 @@ void RenderingSystem::Shutdown()
         m_deferredLightConstantBuffer->Unmap(0, nullptr);
         m_deferredLightCBMappedData = nullptr;
     }
+    if (m_waterCBMappedData != nullptr && m_waterConstantBuffer != nullptr)
+    {
+        m_waterConstantBuffer->Unmap(0, nullptr);
+        m_waterCBMappedData = nullptr;
+    }
 
     m_deferredLightConstantBuffer.Reset();
+    m_waterConstantBuffer.Reset();
     m_deferredGeometryPSO.Reset();
     m_deferredLightingPSO.Reset();
     m_debugOverlayPSO.Reset();
+    m_waterPSO.Reset();
     m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
+    m_waterRootSignature.Reset();
     m_deferredGeometryVS.Reset();
     m_deferredGeometryHS.Reset();
     m_deferredGeometryDS.Reset();
@@ -86,6 +99,10 @@ void RenderingSystem::Shutdown()
     m_deferredLightingPS.Reset();
     m_debugOverlayVS.Reset();
     m_debugOverlayPS.Reset();
+    m_waterVS.Reset();
+    m_waterHS.Reset();
+    m_waterDS.Reset();
+    m_waterPS.Reset();
     m_gbuffer.Shutdown();
     m_context.Shutdown();
 }
@@ -98,6 +115,11 @@ void RenderingSystem::SetTechnique(Technique technique)
 RenderingSystem::Technique RenderingSystem::GetTechnique() const
 {
     return m_technique;
+}
+
+RenderingSystem::Scene RenderingSystem::GetCurrentScene() const
+{
+    return m_context.GetCurrentScene();
 }
 
 void RenderingSystem::SetClearColor(float r, float g, float b, float a)
@@ -236,6 +258,32 @@ void RenderingSystem::RenderLightingStage()
 
 void RenderingSystem::RenderTransparentStage()
 {
+    if (!m_waterPSO || !m_waterRootSignature)
+    {
+        return;
+    }
+
+    if (m_context.GetCurrentScene() != Scene::Sponza)
+    {
+        return;
+    }
+
+    UpdateWaterConstants();
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    D3D12_VIEWPORT vp = m_context.GetViewport();
+    D3D12_RECT sc = m_context.GetScissorRect();
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_context.GetDepthStencilView();
+
+    commandList->RSSetViewports(1, &vp);
+    commandList->RSSetScissorRects(1, &sc);
+    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, &dsv);
+    commandList->SetPipelineState(m_waterPSO.Get());
+    commandList->SetGraphicsRootSignature(m_waterRootSignature.Get());
+    commandList->SetGraphicsRootConstantBufferView(0, m_waterConstantBuffer->GetGPUVirtualAddress());
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    commandList->DrawInstanced(6, 1, 0, 0);
 }
 
 // инициализация Deferred Resources
@@ -247,7 +295,10 @@ bool RenderingSystem::InitializeDeferredResources()
         CreateDeferredLightingPipeline() &&
         CreateDebugOverlayRootSignature() &&
         CreateDebugOverlayPipeline() &&
-        CreateLightingConstantBuffer();
+        CreateWaterRootSignature() &&
+        CreateWaterPipeline() &&
+        CreateLightingConstantBuffer() &&
+        CreateWaterConstantBuffer();
 }
 
 bool RenderingSystem::CompileDeferredShaders()
@@ -260,9 +311,11 @@ bool RenderingSystem::CompileDeferredShaders()
     wchar_t geometryPath[MAX_PATH];
     wchar_t lightingPath[MAX_PATH];
     wchar_t debugPath[MAX_PATH];
+    wchar_t waterPath[MAX_PATH];
     if (!ResolveShaderPath(L"DeferredGeometry.hlsl", geometryPath, MAX_PATH) ||
         !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH) ||
-        !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH))
+        !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH) ||
+        !ResolveShaderPath(L"Water.hlsl", waterPath, MAX_PATH))
     {
         return false;
     }
@@ -382,6 +435,66 @@ bool RenderingSystem::CompileDeferredShaders()
         0,
         &m_debugOverlayPS,
         nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        waterPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_waterVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        waterPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "HSMain",
+        "hs_5_0",
+        flags,
+        0,
+        &m_waterHS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        waterPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "DSMain",
+        "ds_5_0",
+        flags,
+        0,
+        &m_waterDS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        waterPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        flags,
+        0,
+        &m_waterPS,
+        nullptr);
     return SUCCEEDED(hr);
 }
 
@@ -469,6 +582,49 @@ bool RenderingSystem::CreateDebugOverlayRootSignature()
         serialized->GetBufferPointer(),
         serialized->GetBufferSize(),
         IID_PPV_ARGS(&m_debugOverlayRootSignature)));
+}
+
+bool RenderingSystem::CreateWaterRootSignature()
+{
+    D3D12_ROOT_PARAMETER rootParam{};
+    rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParam.Descriptor.ShaderRegister = 0;
+    rootParam.Descriptor.RegisterSpace = 0;
+    rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = 1;
+    desc.pParameters = &rootParam;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers = &sampler;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &desc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_waterRootSignature)));
 }
 
 //сцена рисуется не в один цветовой буфер, а сразу в несколько текстур GBuffer
@@ -562,6 +718,41 @@ bool RenderingSystem::CreateDebugOverlayPipeline()
     pso.SampleDesc.Count = 1;
 
     return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_debugOverlayPSO)));
+}
+
+bool RenderingSystem::CreateWaterPipeline()
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_waterRootSignature.Get();
+    pso.VS = { m_waterVS->GetBufferPointer(), m_waterVS->GetBufferSize() };
+    pso.HS = { m_waterHS->GetBufferPointer(), m_waterHS->GetBufferSize() };
+    pso.DS = { m_waterDS->GetBufferPointer(), m_waterDS->GetBufferSize() };
+    pso.PS = { m_waterPS->GetBufferPointer(), m_waterPS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_waterPSO)));
 }
 
 void RenderingSystem::RenderGBufferDebugOverlay()
@@ -667,6 +858,43 @@ bool RenderingSystem::CreateLightingConstantBuffer()
     return true;
 }
 
+bool RenderingSystem::CreateWaterConstantBuffer()
+{
+    const UINT cbSize = (sizeof(WaterCB) + 255) & ~255u;
+
+    D3D12_HEAP_PROPERTIES upload{};
+    upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = cbSize;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(m_context.GetDevice()->CreateCommittedResource(
+        &upload,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_waterConstantBuffer))))
+    {
+        return false;
+    }
+
+    D3D12_RANGE readRange{ 0, 0 };
+    if (FAILED(m_waterConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_waterCBMappedData))))
+    {
+        return false;
+    }
+
+    UpdateWaterConstants();
+    return true;
+}
+
 void RenderingSystem::UpdateLightingConstants()
 {
     if (m_deferredLightCBMappedData == nullptr)
@@ -718,5 +946,54 @@ void RenderingSystem::UpdateLightingConstants()
     XMStoreFloat4x4(&cb.InvProj, XMMatrixTranspose(invProj));
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateWaterConstants()
+{
+    if (m_waterCBMappedData == nullptr)
+    {
+        return;
+    }
+
+    WaterCB cb{};
+
+    const XMFLOAT3 cameraPosValue = m_context.GetCameraPosition();
+    const XMFLOAT3 cameraTargetValue = m_context.GetCameraTarget();
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const XMFLOAT3 sceneMin = m_context.GetSceneBoundsMin();
+    const float time = m_context.GetTime();
+
+    XMVECTOR cameraPos = XMLoadFloat3(&cameraPosValue);
+    XMVECTOR cameraTarget = XMLoadFloat3(&cameraTargetValue);
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    XMMATRIX view = XMMatrixLookAtLH(cameraPos, cameraTarget, up);
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(
+        XM_PIDIV4,
+        static_cast<float>(m_width) / static_cast<float>(m_height),
+        1.0f,
+        20000.0f);
+
+    XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
+    XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
+    cb.CameraPos = XMFLOAT4(cameraPosValue.x, cameraPosValue.y, cameraPosValue.z, 1.0f);
+
+    const float waterY = sceneMin.y + sceneExtents.y * 1.72f;
+    cb.WaterOrigin = XMFLOAT4(
+        sceneCenter.x,
+        waterY,
+        sceneCenter.z,
+        time);
+    cb.WaterSize = XMFLOAT4(
+        (std::max)(sceneExtents.x * 0.62f, 420.0f),
+        (std::max)(sceneExtents.z * 0.34f, 220.0f),
+        0.0f,
+        0.0f);
+    cb.WaterColor = XMFLOAT4(0.14f, 0.58f, 0.76f, 0.64f);
+    cb.WaveA = XMFLOAT4(0.036f, 4.2f, 1.35f, 2.10f);
+    cb.WaveB = XMFLOAT4(0.052f, 2.7f, -1.70f, 0.031f);
+
+    std::memcpy(m_waterCBMappedData, &cb, sizeof(cb));
 }
 

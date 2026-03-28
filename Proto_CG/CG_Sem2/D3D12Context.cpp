@@ -36,6 +36,9 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
     if (!CreatePipelineState()) return false;
 
     if (!CreateSRVHeap(MaxSrvCount)) return false;
+    if (!LoadScene(Scene::HighPlane)) return false;
+    if (!CreateConstantBuffer()) return false;
+    return true;
 
     // Подготовка путей
     char exeDirA[MAX_PATH];
@@ -134,6 +137,123 @@ bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
 }
 
 // движение камеры
+bool D3D12Context::LoadScene(Scene scene)
+{
+    namespace fs = std::filesystem;
+
+    WaitForGPU();
+
+    char exeDirA[MAX_PATH];
+    GetModuleFileNameA(nullptr, exeDirA, MAX_PATH);
+    char* lastSlash = strrchr(exeDirA, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+    const fs::path modelsDir = fs::path(exeDirA) / "models";
+
+    const bool isHighPlane = (scene == Scene::HighPlane || scene == Scene::HighPolyDisplacement);
+    const bool useDisplacement = isHighPlane;
+    const fs::path objPath = modelsDir / (isHighPlane ? "high plane.obj" : "sponza.obj");
+    const std::string mtlDir = modelsDir.string();
+
+    m_vertexBuffer.Reset();
+    m_indexBuffer.Reset();
+    m_textures.clear();
+    m_textureUploads.clear();
+    m_submeshes.clear();
+    m_materialDiffusePaths.clear();
+    m_materialToSrv.clear();
+    m_indexCount = 0;
+    m_use32BitIndices = false;
+    m_baseColorSrvIndex = 0;
+    m_displacementSrvIndex = 0;
+    m_normalMapSrvIndex = 0;
+    m_roughnessSrvIndex = 0;
+
+    m_commandAllocator->Reset();
+    m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+
+    if (!CreateSolidColorTexture(0xffffffffu, 0))
+        return false;
+    if (!CreateSolidColorTexture(0xffffffffu, 124))
+        return false;
+    if (!CreateSolidColorTexture(0xffffffffu, 125))
+        return false;
+    if (!CreateSolidColorTexture(0xffffffffu, 126))
+        return false;
+    if (!CreateSolidColorTexture(0xffffffffu, 127))
+        return false;
+
+    bool modelLoaded = LoadModelFromOBJ(objPath.string().c_str(), mtlDir.c_str());
+
+    if (!modelLoaded)
+    {
+        if (!CreateGeometry())
+            return false;
+
+        m_submeshes.clear();
+        Submesh sm{};
+        sm.IndexStart = 0;
+        sm.IndexCount = m_indexCount;
+        sm.MaterialId = -1;
+        sm.SrvIndex = 0;
+        m_submeshes.push_back(sm);
+    }
+
+    if (isHighPlane)
+    {
+        const std::string texturesDir = (modelsDir / "textures").string();
+
+        m_baseColorSrvIndex = 125;
+        if (!CreateTextureFromFile((texturesDir + "\\New_Graph_basecolor.jpg").c_str(), m_baseColorSrvIndex))
+        {
+            m_baseColorSrvIndex = 0;
+        }
+
+        if (useDisplacement)
+        {
+            m_displacementSrvIndex = 127;
+            if (!CreateTextureFromFile((texturesDir + "\\New_Graph_height.jpg").c_str(), m_displacementSrvIndex))
+            {
+                m_displacementSrvIndex = 0;
+            }
+        }
+
+        m_normalMapSrvIndex = 126;
+        if (!CreateTextureFromFile((texturesDir + "\\New_Graph_normal.jpg").c_str(), m_normalMapSrvIndex))
+        {
+            m_normalMapSrvIndex = 0;
+        }
+
+        m_roughnessSrvIndex = 124;
+        if (!CreateTextureFromFile((texturesDir + "\\New_Graph_roughness.jpg").c_str(), m_roughnessSrvIndex))
+        {
+            m_roughnessSrvIndex = 0;
+        }
+
+        if (m_baseColorSrvIndex != 0)
+        {
+            for (auto& sm : m_submeshes)
+            {
+                sm.SrvIndex = m_baseColorSrvIndex;
+            }
+        }
+    }
+
+    const XMFLOAT3 sceneCenter = GetSceneCenter();
+    const XMFLOAT3 sceneExtents = GetSceneExtents();
+    m_cameraTarget = sceneCenter;
+    m_cameraDistance = (std::max)(25.0f, (sceneExtents.x + sceneExtents.y + sceneExtents.z) * 1.35f);
+    m_cameraYaw = 0.0f;
+    m_cameraPitch = -0.75f;
+    m_currentScene = scene;
+
+    m_commandList->Close();
+    ID3D12CommandList* lists[] = { m_commandList.Get() };
+    m_commandQueue->ExecuteCommandLists(1, lists);
+    WaitForGPU();
+
+    return true;
+}
+
 void D3D12Context::UpdateCameraOrbit(float deltaTime,
     float rotateSpeed, float dollySpeed,
     bool orbitRotate, bool dolly,
@@ -296,7 +416,14 @@ void D3D12Context::UpdateCB()
     );
 
     m_cbData.TimeParams = XMFLOAT4(m_time, 1.0f, 0.0f, 0.0f);
-    m_cbData.TessellationParams = XMFLOAT4(0.35f, 20.0f, 1.5f, 320.0f);
+    if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
+    {
+        m_cbData.TessellationParams = XMFLOAT4(0.18f, 24.0f, 5.0f, 760.0f);
+    }
+    else
+    {
+        m_cbData.TessellationParams = XMFLOAT4(0.0f, 1.0f, 1.0f, 1.0f);
+    }
 
     memcpy(m_cbMappedData, &m_cbData, sizeof(PerObjectCB));
 }
@@ -330,13 +457,66 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
         return false;
     }
 
+    std::vector<std::vector<stbi_uc>> mipData;
+    std::vector<UINT> mipWidths;
+    std::vector<UINT> mipHeights;
+
+    mipData.emplace_back(pixels, pixels + (size_t(w) * size_t(h) * 4));
+    mipWidths.push_back(static_cast<UINT>(w));
+    mipHeights.push_back(static_cast<UINT>(h));
+
+    while (mipWidths.back() > 1 || mipHeights.back() > 1)
+    {
+        const UINT srcWidth = mipWidths.back();
+        const UINT srcHeight = mipHeights.back();
+        const UINT dstWidth = (std::max)(1u, srcWidth / 2u);
+        const UINT dstHeight = (std::max)(1u, srcHeight / 2u);
+
+        const std::vector<stbi_uc>& src = mipData.back();
+        std::vector<stbi_uc> dst(size_t(dstWidth) * size_t(dstHeight) * 4u, 0);
+
+        for (UINT y = 0; y < dstHeight; ++y)
+        {
+            for (UINT x = 0; x < dstWidth; ++x)
+            {
+                for (UINT c = 0; c < 4; ++c)
+                {
+                    UINT sum = 0;
+                    UINT count = 0;
+
+                    for (UINT oy = 0; oy < 2; ++oy)
+                    {
+                        for (UINT ox = 0; ox < 2; ++ox)
+                        {
+                            const UINT sx = (std::min)(srcWidth - 1u, x * 2u + ox);
+                            const UINT sy = (std::min)(srcHeight - 1u, y * 2u + oy);
+                            const size_t srcIndex = (size_t(sy) * size_t(srcWidth) + size_t(sx)) * 4u + c;
+                            sum += src[srcIndex];
+                            ++count;
+                        }
+                    }
+
+                    const size_t dstIndex = (size_t(y) * size_t(dstWidth) + size_t(x)) * 4u + c;
+                    dst[dstIndex] = static_cast<stbi_uc>(sum / (std::max)(count, 1u));
+                }
+            }
+        }
+
+        mipData.push_back(std::move(dst));
+        mipWidths.push_back(dstWidth);
+        mipHeights.push_back(dstHeight);
+    }
+
+    stbi_image_free(pixels);
+    const UINT mipCount = static_cast<UINT>(mipData.size());
+
     D3D12_RESOURCE_DESC texDesc{};
     texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     texDesc.Alignment = 0;
     texDesc.Width = (UINT64)w;
     texDesc.Height = (UINT)h;
     texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels = 1;
+    texDesc.MipLevels = static_cast<UINT16>(mipCount);
     texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     texDesc.SampleDesc.Count = 1;
     texDesc.SampleDesc.Quality = 0;
@@ -359,23 +539,21 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 
     if (FAILED(hr) || !texture)
     {
-        stbi_image_free(pixels);
         OutputDebugStringA(("CreateCommittedResource(DEFAULT) failed: " + std::string(filePath) + "\n").c_str());
         return false;
     }
 
-    
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mipCount);
+    std::vector<UINT> numRows(mipCount);
+    std::vector<UINT64> rowSizes(mipCount);
     UINT64 totalBytes = 0;
 
     m_device->GetCopyableFootprints(
         &texDesc,
-        0, 1, 0,
-        &footprint,
-        &numRows,
-        &rowSizeInBytes,
+        0, mipCount, 0,
+        footprints.data(),
+        numRows.data(),
+        rowSizes.data(),
         &totalBytes);
 
     D3D12_HEAP_PROPERTIES uploadHeap{};
@@ -406,49 +584,53 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
 
     if (FAILED(hr) || !upload)
     {
-        stbi_image_free(pixels);
         OutputDebugStringA(("CreateCommittedResource(UPLOAD) failed: " + std::string(filePath) + "\n").c_str());
         return false;
     }
 
-    
     void* mapped = nullptr;
     hr = upload->Map(0, nullptr, &mapped);
     if (FAILED(hr) || !mapped)
     {
-        stbi_image_free(pixels);
         OutputDebugStringA(("Upload Map failed: " + std::string(filePath) + "\n").c_str());
         return false;
     }
 
     const UINT bytesPerPixel = 4;
-    const UINT srcRowBytes = (UINT)w * bytesPerPixel;
+    BYTE* uploadBase = reinterpret_cast<BYTE*>(mapped);
 
-    BYTE* dstBase = reinterpret_cast<BYTE*>(mapped) + footprint.Offset;
-
-    for (UINT y = 0; y < (UINT)h; ++y)
+    for (UINT mipIndex = 0; mipIndex < mipCount; ++mipIndex)
     {
-        BYTE* dstRow = dstBase + y * footprint.Footprint.RowPitch;
-        const BYTE* srcRow = reinterpret_cast<const BYTE*>(pixels) + y * srcRowBytes;
-        memcpy(dstRow, srcRow, srcRowBytes);
+        const UINT srcWidth = mipWidths[mipIndex];
+        const UINT srcHeight = mipHeights[mipIndex];
+        const UINT srcRowBytes = srcWidth * bytesPerPixel;
+        BYTE* dstBase = uploadBase + footprints[mipIndex].Offset;
+        const std::vector<stbi_uc>& src = mipData[mipIndex];
+
+        for (UINT y = 0; y < srcHeight; ++y)
+        {
+            BYTE* dstRow = dstBase + y * footprints[mipIndex].Footprint.RowPitch;
+            const BYTE* srcRow = src.data() + size_t(y) * size_t(srcRowBytes);
+            memcpy(dstRow, srcRow, srcRowBytes);
+        }
     }
 
     upload->Unmap(0, nullptr);
-    stbi_image_free(pixels);
 
-    
+    for (UINT mipIndex = 0; mipIndex < mipCount; ++mipIndex)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = texture.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = mipIndex;
 
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = texture.Get();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = footprints[mipIndex];
 
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = upload.Get();
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = footprint;
-
-    m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -468,7 +650,7 @@ bool D3D12Context::CreateTextureFromFile(const char* filePath, UINT srvIndex)
     srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MostDetailedMip = 0;
-    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.MipLevels = mipCount;
     srv.Texture2D.PlaneSlice = 0;
     srv.Texture2D.ResourceMinLODClamp = 0.0f;
 
@@ -945,8 +1127,12 @@ bool D3D12Context::CreateRootSignature()
 
     // правила чтения текстуры
     D3D12_STATIC_SAMPLER_DESC staticSampler{};
+    staticSampler.Filter = D3D12_FILTER_ANISOTROPIC;
+    staticSampler.MaxAnisotropy = 8;
     staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR; // сглаживание
     staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;  // повторение текстуры
+    staticSampler.Filter = D3D12_FILTER_ANISOTROPIC;
+    staticSampler.MaxAnisotropy = 8;
     staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
@@ -1481,7 +1667,7 @@ bool D3D12Context::CreateConstantBuffer()
     XMMATRIX I = XMMatrixIdentity();
     m_cbData.UVTransform = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
     m_cbData.TimeParams = XMFLOAT4(0.0f, 1.0f, 0.0f, 0.0f);
-    m_cbData.TessellationParams = XMFLOAT4(0.35f, 20.0f, 1.5f, 320.0f);
+    m_cbData.TessellationParams = XMFLOAT4(0.0f, 1.0f, 1.0f, 1.0f);
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(I));
 
     D3D12_RANGE readRange{ 0,0 };
@@ -1681,6 +1867,16 @@ DirectX::XMFLOAT3 D3D12Context::GetSceneExtents() const
         0.5f * (m_sceneBoundsMax.x - m_sceneBoundsMin.x),
         0.5f * (m_sceneBoundsMax.y - m_sceneBoundsMin.y),
         0.5f * (m_sceneBoundsMax.z - m_sceneBoundsMin.z));
+}
+
+D3D12Context::Scene D3D12Context::GetCurrentScene() const
+{
+    return m_currentScene;
+}
+
+float D3D12Context::GetTime() const
+{
+    return m_time;
 }
 
 void D3D12Context::SetTime(float t)

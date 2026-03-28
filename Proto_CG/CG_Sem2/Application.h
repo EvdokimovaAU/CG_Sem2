@@ -22,4 +22,6 @@ private:
     GameTimer    m_timer;
     RenderingSystem m_renderingSystem;
     InputDevice  m_input;
+    bool m_scene1WasDown = false;
+    bool m_scene2WasDown = false;
 };

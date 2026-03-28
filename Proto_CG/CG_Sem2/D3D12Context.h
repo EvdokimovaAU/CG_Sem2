@@ -35,11 +35,19 @@ struct Submesh
 class D3D12Context
 {
 public:
+    enum class Scene
+    {
+        HighPlane,
+        Sponza,
+        HighPolyDisplacement
+    };
+
     void SetTime(float t);
     void SetUVTiling(float x, float y);
     void SetUVScrollSpeed(float uSpeed, float vSpeed);
 
     bool Initialize(HWND hwnd, UINT width, UINT height);
+    bool LoadScene(Scene scene);
     void Shutdown();
 
     void Render(float r, float g, float b, float a);
@@ -74,6 +82,8 @@ public:
     DirectX::XMFLOAT3 GetSceneBoundsMax() const;
     DirectX::XMFLOAT3 GetSceneCenter() const;
     DirectX::XMFLOAT3 GetSceneExtents() const;
+    Scene GetCurrentScene() const;
+    float GetTime() const;
 
 private:
 
@@ -176,4 +186,5 @@ private:
     UINT m_normalMapSrvIndex = 0;
     UINT m_baseColorSrvIndex = 0;
     UINT m_roughnessSrvIndex = 0;
+    Scene m_currentScene = Scene::HighPlane;
 };

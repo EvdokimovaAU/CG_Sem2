@@ -19,11 +19,15 @@ public:
         Deferred
     };
 
+    using Scene = D3D12Context::Scene;
+
     bool Initialize(HWND hwnd, UINT width, UINT height);
+    bool LoadScene(Scene scene);
     void Shutdown();
 
     void SetTechnique(Technique technique);
     Technique GetTechnique() const;
+    Scene GetCurrentScene() const;
 
     void SetClearColor(float r, float g, float b, float a);
     void SetTime(float timeSeconds);
@@ -55,8 +59,12 @@ private:
     bool CreateDeferredLightingPipeline();
     bool CreateDebugOverlayRootSignature();
     bool CreateDebugOverlayPipeline();
+    bool CreateWaterRootSignature();
+    bool CreateWaterPipeline();
     bool CreateLightingConstantBuffer();
+    bool CreateWaterConstantBuffer();
     void UpdateLightingConstants();
+    void UpdateWaterConstants();
 
 private:
     static constexpr UINT MaxPointLights = 6;
@@ -78,6 +86,18 @@ private:
         DirectX::XMFLOAT4X4 InvProj;
     };
 
+    struct WaterCB
+    {
+        DirectX::XMFLOAT4X4 View;
+        DirectX::XMFLOAT4X4 Proj;
+        DirectX::XMFLOAT4 CameraPos;
+        DirectX::XMFLOAT4 WaterOrigin;
+        DirectX::XMFLOAT4 WaterSize;
+        DirectX::XMFLOAT4 WaterColor;
+        DirectX::XMFLOAT4 WaveA;
+        DirectX::XMFLOAT4 WaveB;
+    };
+
 private:
     D3D12Context m_context;
     GBuffer m_gbuffer;
@@ -94,11 +114,19 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_waterVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_waterHS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_waterDS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_waterPS;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_deferredLightingRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_debugOverlayRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_waterRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredLightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_debugOverlayPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waterPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_deferredLightConstantBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_waterConstantBuffer;
     UINT8* m_deferredLightCBMappedData = nullptr;
+    UINT8* m_waterCBMappedData = nullptr;
 };

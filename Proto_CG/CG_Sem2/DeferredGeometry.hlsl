@@ -41,8 +41,6 @@ struct PSInput
     float3 NormalW : TEXCOORD1;
     float2 UV : TEXCOORD2;
     float ViewDepth : TEXCOORD3;
-    float3 TangentW : TEXCOORD4;
-    float3 BitangentW : TEXCOORD5;
 };
 
 struct GBufferOutput
@@ -81,7 +79,7 @@ float ComputeTessFactor(float3 p0, float3 p1, float3 p2)
 [partitioning("fractional_odd")]
 [outputtopology("triangle_cw")]
 [outputcontrolpoints(3)]
-[maxtessfactor(32.0)]
+[maxtessfactor(64.0)]
 HSControlPoint HSMain(
     InputPatch<HSControlPoint, 3> patch,
     uint controlPointId : SV_OutputControlPointID)
@@ -130,6 +128,41 @@ void ComputePatchBasis(
     bitangent = normalize((edge2 * duv1.x - edge1 * duv2.x) * invDet);
 }
 
+float3x3 ComputeTBN(float3 normalW, float3 worldPos, float2 uv)
+{
+    float3 dp1 = ddx(worldPos);
+    float3 dp2 = ddy(worldPos);
+    float2 duv1 = ddx(uv);
+    float2 duv2 = ddy(uv);
+
+    float3 dp2Perp = cross(dp2, normalW);
+    float3 dp1Perp = cross(normalW, dp1);
+    float3 tangent = dp2Perp * duv1.x + dp1Perp * duv2.x;
+    float3 bitangent = dp2Perp * duv1.y + dp1Perp * duv2.y;
+
+    float invMax = rsqrt(max(dot(tangent, tangent), dot(bitangent, bitangent)));
+    return float3x3(tangent * invMax, bitangent * invMax, normalW);
+}
+
+float4 SampleAntiAliased(Texture2D tex, float2 uv)
+{
+    float2 du = ddx(uv);
+    float2 dv = ddy(uv);
+    float footprint = max(length(du), length(dv));
+    float filterAmount = saturate(footprint * 512.0f);
+    float2 offset = (abs(du) + abs(dv)) * 0.35f;
+
+    float4 baseSample = tex.Sample(gSampler, uv);
+    float4 blurred =
+        tex.Sample(gSampler, uv + float2( offset.x,  offset.y)) +
+        tex.Sample(gSampler, uv + float2(-offset.x,  offset.y)) +
+        tex.Sample(gSampler, uv + float2( offset.x, -offset.y)) +
+        tex.Sample(gSampler, uv + float2(-offset.x, -offset.y));
+    blurred *= 0.25f;
+
+    return lerp(baseSample, blurred, filterAmount);
+}
+
 [domain("tri")]
 PSInput DSMain(
     HSConstants patchConstants,
@@ -159,14 +192,6 @@ PSInput DSMain(
     float3 bitangent;
     ComputePatchBasis(patch, tangent, bitangent);
 
-    float3 displacedU = pos + tangent * texel.x + normal * heightU;
-    float3 displacedV = pos + bitangent * texel.y + normal * heightV;
-    float3 displacedNormal = normalize(cross(displacedU - displacedPos, displacedV - displacedPos));
-    if (dot(displacedNormal, normal) < 0.0f)
-    {
-        displacedNormal *= -1.0f;
-    }
-
     float4 posW = mul(float4(displacedPos, 1.0f), World);
     float4 posV = mul(posW, View);
     o.PosH = mul(posV, Proj);
@@ -174,9 +199,7 @@ PSInput DSMain(
     o.ViewDepth = posV.z;
 
     float3x3 world3x3 = (float3x3)World;
-    o.NormalW = normalize(mul(world3x3, displacedNormal));
-    o.TangentW = normalize(mul(world3x3, tangent));
-    o.BitangentW = normalize(mul(world3x3, bitangent));
+    o.NormalW = normalize(mul(world3x3, normal));
     o.UV = baseUV;
 
     return o;
@@ -187,15 +210,12 @@ GBufferOutput PSMain(PSInput input)
     GBufferOutput o;
 
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
-    float4 albedo = gTex.Sample(gSampler, uv);
+    float4 albedo = SampleAntiAliased(gTex, uv);
     albedo.rgb = saturate(pow(albedo.rgb, 0.9f) * 1.22f);
-    float roughness = gRoughnessTex.Sample(gSampler, uv).r;
-    float3 normalSample = gNormalTex.Sample(gSampler, uv).xyz * 2.0f - 1.0f;
+    float roughness = SampleAntiAliased(gRoughnessTex, uv).r;
+    float3 normalSample = SampleAntiAliased(gNormalTex, uv).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
-    float3x3 tbn = float3x3(
-        normalize(input.TangentW),
-        normalize(input.BitangentW),
-        normalize(input.NormalW));
+    float3x3 tbn = ComputeTBN(normalize(input.NormalW), input.WorldPos, uv);
     float3 normal = normalize(mul(normalSample, tbn));
     float depth = saturate(input.ViewDepth / 20000.0f);
 
