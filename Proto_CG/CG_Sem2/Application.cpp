@@ -8,11 +8,14 @@ Application::Application(HINSTANCE hInstance, int nCmdShow)
 
 bool Application::Initialize()
 {
+    constexpr UINT windowWidth = 800;
+    constexpr UINT windowHeight = 600;
+
     if (!m_window.Create(
         m_hInstance,
         m_nCmdShow,
-        800,
-        600,
+        windowWidth,
+        windowHeight,
         L"DX12WindowClass",
         L"KG_Laba4 - DX12 Final"))
     {
@@ -22,7 +25,7 @@ bool Application::Initialize()
 
     m_window.SetInputDevice(&m_input);
 
-    if (!m_renderingSystem.Initialize(m_window.GetHWND(), 1200, 1000))
+    if (!m_renderingSystem.Initialize(m_window.GetHWND(), windowWidth, windowHeight))
     {
         MessageBoxW(nullptr, L"DX12 Initialize FAILED (see Output window)", L"Error", MB_OK);
         return false;

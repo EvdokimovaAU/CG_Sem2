@@ -98,36 +98,6 @@ HSConstants PatchConstantFunction(InputPatch<HSControlPoint, 3> patch)
     return output;
 }
 
-void ComputePatchBasis(
-    InputPatch<HSControlPoint, 3> patch,
-    out float3 tangent,
-    out float3 bitangent)
-{
-    float3 p0 = patch[0].Pos;
-    float3 p1 = patch[1].Pos;
-    float3 p2 = patch[2].Pos;
-    float2 uv0 = patch[0].UV;
-    float2 uv1 = patch[1].UV;
-    float2 uv2 = patch[2].UV;
-
-    float3 edge1 = p1 - p0;
-    float3 edge2 = p2 - p0;
-    float2 duv1 = uv1 - uv0;
-    float2 duv2 = uv2 - uv0;
-    float determinant = duv1.x * duv2.y - duv1.y * duv2.x;
-
-    if (abs(determinant) < 1e-5f)
-    {
-        tangent = normalize(edge1);
-        bitangent = normalize(edge2);
-        return;
-    }
-
-    float invDet = 1.0f / determinant;
-    tangent = normalize((edge1 * duv2.y - edge2 * duv1.y) * invDet);
-    bitangent = normalize((edge2 * duv1.x - edge1 * duv2.x) * invDet);
-}
-
 float3x3 ComputeTBN(float3 normalW, float3 worldPos, float2 uv)
 {
     float3 dp1 = ddx(worldPos);
@@ -180,18 +150,6 @@ PSInput DSMain(
     float height = (gDisplacementTex.SampleLevel(gSampler, uv, 0).r - 0.5f) * displacementScale;
     float3 displacedPos = pos + normal * height;
 
-    uint dispWidth = 0;
-    uint dispHeight = 0;
-    gDisplacementTex.GetDimensions(dispWidth, dispHeight);
-
-    float2 texel = float2(1.0f / max((float)dispWidth, 1.0f), 1.0f / max((float)dispHeight, 1.0f));
-    float heightU = (gDisplacementTex.SampleLevel(gSampler, uv + float2(texel.x, 0.0f), 0).r - 0.5f) * displacementScale;
-    float heightV = (gDisplacementTex.SampleLevel(gSampler, uv + float2(0.0f, texel.y), 0).r - 0.5f) * displacementScale;
-
-    float3 tangent;
-    float3 bitangent;
-    ComputePatchBasis(patch, tangent, bitangent);
-
     float4 posW = mul(float4(displacedPos, 1.0f), World);
     float4 posV = mul(posW, View);
     o.PosH = mul(posV, Proj);
@@ -211,7 +169,7 @@ GBufferOutput PSMain(PSInput input)
 
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
     float4 albedo = SampleAntiAliased(gTex, uv);
-    albedo.rgb = saturate(pow(albedo.rgb, 0.9f) * 1.22f);
+    albedo.rgb = saturate(pow(albedo.rgb, 1.08f) * 0.82f);
     float roughness = SampleAntiAliased(gRoughnessTex, uv).r;
     float3 normalSample = SampleAntiAliased(gNormalTex, uv).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
