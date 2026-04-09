@@ -62,6 +62,9 @@ int Application::Run()
 
         const bool scene1Down = m_input.IsKeyDown('1');
         const bool scene2Down = m_input.IsKeyDown('2');
+        const bool scene3Down = m_input.IsKeyDown('3');
+        const bool toggleFrustumDown = m_input.IsKeyDown('Q');
+        const bool toggleOctreeDown = m_input.IsKeyDown('E');
 
         if (scene1Down && !m_scene1WasDown)
         {
@@ -73,8 +76,28 @@ int Application::Run()
             m_renderingSystem.LoadScene(RenderingSystem::Scene::Sponza);
         }
 
+        if (scene3Down && !m_scene3WasDown)
+        {
+            m_renderingSystem.LoadScene(RenderingSystem::Scene::ChickenField);
+        }
+
+        if (toggleFrustumDown && !m_toggleFrustumWasDown)
+        {
+            const bool enabled = m_renderingSystem.IsFrustumCullingEnabled();
+            m_renderingSystem.SetFrustumCullingEnabled(!enabled);
+        }
+
+        if (toggleOctreeDown && !m_toggleOctreeWasDown)
+        {
+            const bool enabled = m_renderingSystem.IsOctreeEnabled();
+            m_renderingSystem.SetOctreeEnabled(!enabled);
+        }
+
         m_scene1WasDown = scene1Down;
         m_scene2WasDown = scene2Down;
+        m_scene3WasDown = scene3Down;
+        m_toggleFrustumWasDown = toggleFrustumDown;
+        m_toggleOctreeWasDown = toggleOctreeDown;
 
         m_timer.Tick();
         float deltaTime = m_timer.DeltaTime();

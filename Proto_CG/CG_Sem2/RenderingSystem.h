@@ -28,6 +28,10 @@ public:
     void SetTechnique(Technique technique);
     Technique GetTechnique() const;
     Scene GetCurrentScene() const;
+    void SetFrustumCullingEnabled(bool enabled);
+    bool IsFrustumCullingEnabled() const;
+    void SetOctreeEnabled(bool enabled);
+    bool IsOctreeEnabled() const;
 
     void SetClearColor(float r, float g, float b, float a);
     void SetTime(float timeSeconds);

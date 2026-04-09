@@ -4,6 +4,7 @@
 #include <dxgi1_6.h>
 #include <DirectXMath.h>
 #include <wrl.h>
+#include <array>
 #include <string>
 #include <vector>             
 #include "tiny_obj_loader.h"
@@ -32,6 +33,34 @@ struct Submesh
     UINT SrvIndex = 0;
 };
 
+struct BoundingBox
+{
+    XMFLOAT3 Min = { 0.0f, 0.0f, 0.0f };
+    XMFLOAT3 Max = { 0.0f, 0.0f, 0.0f };
+};
+
+struct SceneObject
+{
+    XMFLOAT4X4 World{};
+    BoundingBox BoundsLocal{};
+    BoundingBox BoundsWorld{};
+    UINT DiffuseSrvIndex = UINT_MAX;
+    bool Visible = true;
+};
+
+struct Frustum
+{
+    std::array<XMFLOAT4, 6> Planes{};
+};
+
+struct OctreeNode
+{
+    BoundingBox Bounds{};
+    std::vector<UINT> ObjectIndices;
+    std::array<int, 8> Children = { -1, -1, -1, -1, -1, -1, -1, -1 };
+    bool IsLeaf = true;
+};
+
 class D3D12Context
 {
 public:
@@ -39,7 +68,8 @@ public:
     {
         HighPlane,
         Sponza,
-        HighPolyDisplacement
+        HighPolyDisplacement,
+        ChickenField
     };
 
     void SetTime(float t);
@@ -49,6 +79,10 @@ public:
     bool Initialize(HWND hwnd, UINT width, UINT height);
     bool LoadScene(Scene scene);
     void Shutdown();
+    void SetFrustumCullingEnabled(bool enabled);
+    bool IsFrustumCullingEnabled() const;
+    void SetOctreeEnabled(bool enabled);
+    bool IsOctreeEnabled() const;
 
     void Render(float r, float g, float b, float a);
     void SetRotation(float t);
@@ -69,7 +103,7 @@ public:
     ID3D12GraphicsCommandList* GetCommandList() const;
     ID3D12DescriptorHeap* GetSceneSRVHeap() const;
     ID3D12RootSignature* GetSceneRootSignature() const;
-    D3D12_GPU_VIRTUAL_ADDRESS GetSceneConstantBufferAddress() const;
+    D3D12_GPU_VIRTUAL_ADDRESS GetSceneConstantBufferAddress(UINT objectIndex = 0) const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentBackBufferRTV() const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetDepthStencilView() const;
     D3D12_VIEWPORT GetViewport() const;
@@ -109,7 +143,17 @@ private:
     bool CreateSolidColorTexture(UINT32 rgba, UINT srvIndex);
     bool CreateSRVHeap(UINT numDescriptors);
 
-    void UpdateCB();
+    void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex);
+    void BuildSceneObjects();
+    void UpdateObjectVisibility();
+    void BuildOctree();
+    int BuildOctreeNode(const BoundingBox& bounds, const std::vector<UINT>& objectIndices, UINT depth);
+    void QueryOctreeVisible(int nodeIndex, const Frustum& frustum, std::vector<UINT>& visibleIndices) const;
+    Frustum BuildCameraFrustum() const;
+    DirectX::XMFLOAT4 NormalizePlane(const DirectX::XMFLOAT4& plane) const;
+    bool IntersectsFrustum(const BoundingBox& bounds, const Frustum& frustum) const;
+    bool ContainsBounds(const BoundingBox& outer, const BoundingBox& inner) const;
+    BoundingBox TransformBoundingBox(const BoundingBox& localBounds, const DirectX::XMFLOAT4X4& worldMatrix) const;
     void WaitForFrame(UINT frameIndex);
     UINT64 SignalCurrentFrame();
     void WaitForGPU();
@@ -159,6 +203,8 @@ private:
     ComPtr<ID3D12Resource> m_constantBuffer;
     PerObjectCB m_cbData{};
     UINT8* m_cbMappedData = nullptr;
+    UINT m_constantBufferStride = 0;
+    static constexpr UINT MaxSceneObjects = 2048;
 
     float m_rotationT = 0.f;
 
@@ -176,12 +222,14 @@ private:
 
     // диапазоны индексов по материалам
     std::vector<Submesh> m_submeshes;
+    std::vector<SceneObject> m_sceneObjects;
 
     // текстуры материалов из MTL 
     std::vector<std::string> m_materialDiffusePaths;
 
     // материал 
     std::vector<UINT> m_materialToSrv;
+    BoundingBox m_modelBoundsLocal{};
     DirectX::XMFLOAT3 m_sceneBoundsMin = { -1.0f, -1.0f, -1.0f };
     DirectX::XMFLOAT3 m_sceneBoundsMax = { 1.0f, 1.0f, 1.0f };
     UINT m_displacementSrvIndex = 0;
@@ -189,4 +237,10 @@ private:
     UINT m_baseColorSrvIndex = 0;
     UINT m_roughnessSrvIndex = 0;
     Scene m_currentScene = Scene::HighPlane;
+    bool m_frustumCullingEnabled = true;
+    bool m_octreeEnabled = true;
+    std::vector<OctreeNode> m_octreeNodes;
+    int m_octreeRoot = -1;
+    static constexpr UINT OctreeMaxDepth = 6;
+    static constexpr UINT OctreeMaxObjectsPerNode = 12;
 };

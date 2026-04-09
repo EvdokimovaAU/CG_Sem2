@@ -122,6 +122,26 @@ RenderingSystem::Scene RenderingSystem::GetCurrentScene() const
     return m_context.GetCurrentScene();
 }
 
+void RenderingSystem::SetFrustumCullingEnabled(bool enabled)
+{
+    m_context.SetFrustumCullingEnabled(enabled);
+}
+
+bool RenderingSystem::IsFrustumCullingEnabled() const
+{
+    return m_context.IsFrustumCullingEnabled();
+}
+
+void RenderingSystem::SetOctreeEnabled(bool enabled)
+{
+    m_context.SetOctreeEnabled(enabled);
+}
+
+bool RenderingSystem::IsOctreeEnabled() const
+{
+    return m_context.IsOctreeEnabled();
+}
+
 void RenderingSystem::SetClearColor(float r, float g, float b, float a)
 {
     m_clearColor[0] = r;

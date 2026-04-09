@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 #include <filesystem>
 
@@ -16,6 +17,16 @@
 #pragma comment(lib,"d3dcompiler.lib")
 
 using namespace DirectX;
+
+namespace
+{
+    XMFLOAT4X4 MakeIdentityMatrix()
+    {
+        XMFLOAT4X4 matrix{};
+        XMStoreFloat4x4(&matrix, XMMatrixIdentity());
+        return matrix;
+    }
+}
 
 // инициализация 
 bool D3D12Context::Initialize(HWND hwnd, UINT width, UINT height)
@@ -149,9 +160,14 @@ bool D3D12Context::LoadScene(Scene scene)
     if (lastSlash) *(lastSlash + 1) = '\0';
     const fs::path modelsDir = fs::path(exeDirA) / "models";
 
-    const bool isHighPlane = (scene == Scene::HighPlane || scene == Scene::HighPolyDisplacement);
-    const bool useDisplacement = isHighPlane;
-    const fs::path objPath = modelsDir / (isHighPlane ? "high plane.obj" : "sponza.obj");
+    const bool isHighPlaneScene = (scene == Scene::HighPlane || scene == Scene::HighPolyDisplacement);
+    const bool isCrowdScene = (scene == Scene::ChickenField);
+    const bool isDisplacementScene = (scene == Scene::HighPolyDisplacement);
+    const bool useDisplacement = isHighPlaneScene;
+    const fs::path objPath = modelsDir / (
+        isCrowdScene ? "Dracula-bl.obj" :
+        (isHighPlaneScene ? "high plane.obj" :
+            (scene == Scene::HighPlane ? "high plane.obj" : "sponza.obj")));
     const std::string mtlDir = modelsDir.string();
 
     m_vertexBuffer.Reset();
@@ -161,12 +177,16 @@ bool D3D12Context::LoadScene(Scene scene)
     m_submeshes.clear();
     m_materialDiffusePaths.clear();
     m_materialToSrv.clear();
+    m_sceneObjects.clear();
+    m_octreeNodes.clear();
+    m_octreeRoot = -1;
     m_indexCount = 0;
     m_use32BitIndices = false;
     m_baseColorSrvIndex = 0;
     m_displacementSrvIndex = 0;
     m_normalMapSrvIndex = 0;
     m_roughnessSrvIndex = 0;
+    m_currentScene = scene;
 
     m_commandAllocators[m_frameIndex]->Reset();
     m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr);
@@ -198,7 +218,7 @@ bool D3D12Context::LoadScene(Scene scene)
         m_submeshes.push_back(sm);
     }
 
-    if (isHighPlane)
+    if (isHighPlaneScene)
     {
         const std::string texturesDir = (modelsDir / "textures").string();
 
@@ -237,14 +257,44 @@ bool D3D12Context::LoadScene(Scene scene)
             }
         }
     }
+    else if (isCrowdScene)
+    {
+        const std::string crowdDiffusePath = (modelsDir / "Dracula_texture.png").string();
+
+        m_baseColorSrvIndex = 125;
+        if (CreateTextureFromFile(crowdDiffusePath.c_str(), m_baseColorSrvIndex))
+        {
+            for (auto& sm : m_submeshes)
+            {
+                sm.SrvIndex = m_baseColorSrvIndex;
+            }
+        }
+        else
+        {
+            m_baseColorSrvIndex = 0;
+        }
+    }
+    BuildSceneObjects();
+    BuildOctree();
 
     const XMFLOAT3 sceneCenter = GetSceneCenter();
     const XMFLOAT3 sceneExtents = GetSceneExtents();
-    m_cameraTarget = sceneCenter;
-    m_cameraDistance = (std::max)(25.0f, (sceneExtents.x + sceneExtents.y + sceneExtents.z) * 1.35f);
-    m_cameraYaw = 0.0f;
-    m_cameraPitch = -0.75f;
-    m_currentScene = scene;
+    if (m_currentScene == Scene::ChickenField)
+    {
+        m_cameraTarget = XMFLOAT3(sceneCenter.x, sceneCenter.y + sceneExtents.y * 0.12f, sceneCenter.z);
+        m_cameraDistance = (std::max)(120.0f, (std::max)(sceneExtents.x, sceneExtents.z) * 0.46f);
+        m_cameraYaw = 0.52f;
+        m_cameraPitch = -0.20f;
+    }
+    else
+    {
+        m_cameraTarget = sceneCenter;
+        m_cameraDistance = (std::max)(25.0f, (sceneExtents.x + sceneExtents.y + sceneExtents.z) * 1.35f);
+        m_cameraYaw = 0.0f;
+        m_cameraPitch = -0.75f;
+    }
+
+    UpdateCameraOrbit(0.0f, 0.0f, 0.0f, false, false, 0.0f, 0.0f);
 
     m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
@@ -252,6 +302,26 @@ bool D3D12Context::LoadScene(Scene scene)
     WaitForGPU();
 
     return true;
+}
+
+void D3D12Context::SetFrustumCullingEnabled(bool enabled)
+{
+    m_frustumCullingEnabled = enabled;
+}
+
+bool D3D12Context::IsFrustumCullingEnabled() const
+{
+    return m_frustumCullingEnabled;
+}
+
+void D3D12Context::SetOctreeEnabled(bool enabled)
+{
+    m_octreeEnabled = enabled;
+}
+
+bool D3D12Context::IsOctreeEnabled() const
+{
+    return m_octreeEnabled;
 }
 
 void D3D12Context::UpdateCameraOrbit(float deltaTime,
@@ -384,9 +454,388 @@ void D3D12Context::Render(float r, float g, float b, float a)
 }
 
 // обновление данных для шейдера
-void D3D12Context::UpdateCB()
+void D3D12Context::BuildSceneObjects()
 {
-    XMMATRIX world = XMMatrixIdentity();
+    m_sceneObjects.clear();
+
+    const BoundingBox localBounds = m_modelBoundsLocal;
+    if (m_currentScene != Scene::ChickenField)
+    {
+        SceneObject object{};
+        object.World = MakeIdentityMatrix();
+        object.BoundsLocal = localBounds;
+        object.BoundsWorld = localBounds;
+        object.DiffuseSrvIndex = UINT_MAX;
+        object.Visible = true;
+        m_sceneObjects.push_back(object);
+        m_sceneBoundsMin = localBounds.Min;
+        m_sceneBoundsMax = localBounds.Max;
+        return;
+    }
+
+    const UINT gridX = 30;
+    const UINT gridZ = 30;
+    const float crowdScale = 28.0f;
+    const float modelWidth = (std::max)((localBounds.Max.x - localBounds.Min.x) * crowdScale, 1.0f);
+    const float modelDepth = (std::max)((localBounds.Max.z - localBounds.Min.z) * crowdScale, 1.0f);
+    const float modelHeight = (std::max)((localBounds.Max.y - localBounds.Min.y) * crowdScale, 1.0f);
+    const float spacingX = (std::max)(modelWidth * 1.28f, 16.0f);
+    const float spacingZ = (std::max)(modelDepth * 1.28f, 16.0f);
+    const float startX = -0.5f * spacingX * static_cast<float>(gridX - 1);
+    const float startZ = -0.5f * spacingZ * static_cast<float>(gridZ - 1);
+    const float worldY = -localBounds.Min.y * crowdScale;
+
+    XMFLOAT3 sceneMin(
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)());
+    XMFLOAT3 sceneMax(
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)());
+
+    for (UINT z = 0; z < gridZ; ++z)
+    {
+        for (UINT x = 0; x < gridX; ++x)
+        {
+            SceneObject object{};
+            const float worldX = startX + static_cast<float>(x) * spacingX;
+            const float worldZ = startZ + static_cast<float>(z) * spacingZ;
+            XMMATRIX world = XMMatrixScaling(crowdScale, crowdScale, crowdScale) *
+                XMMatrixTranslation(worldX, worldY, worldZ);
+            XMStoreFloat4x4(&object.World, world);
+            object.BoundsLocal = localBounds;
+            object.BoundsWorld = TransformBoundingBox(localBounds, object.World);
+            object.DiffuseSrvIndex = UINT_MAX;
+            object.Visible = true;
+
+            sceneMin.x = (std::min)(sceneMin.x, object.BoundsWorld.Min.x);
+            sceneMin.y = (std::min)(sceneMin.y, object.BoundsWorld.Min.y);
+            sceneMin.z = (std::min)(sceneMin.z, object.BoundsWorld.Min.z);
+            sceneMax.x = (std::max)(sceneMax.x, object.BoundsWorld.Max.x);
+            sceneMax.y = (std::max)(sceneMax.y, object.BoundsWorld.Max.y);
+            sceneMax.z = (std::max)(sceneMax.z, object.BoundsWorld.Max.z);
+
+            m_sceneObjects.push_back(object);
+        }
+    }
+
+    sceneMax.y = (std::max)(sceneMax.y, worldY + modelHeight);
+    m_sceneBoundsMin = sceneMin;
+    m_sceneBoundsMax = sceneMax;
+}
+
+void D3D12Context::UpdateObjectVisibility()
+{
+    if (m_sceneObjects.empty())
+    {
+        return;
+    }
+
+    if (!m_frustumCullingEnabled)
+    {
+        for (SceneObject& object : m_sceneObjects)
+        {
+            object.Visible = true;
+        }
+        return;
+    }
+
+    const Frustum frustum = BuildCameraFrustum();
+
+    if (m_octreeEnabled && m_octreeRoot >= 0)
+    {
+        for (SceneObject& object : m_sceneObjects)
+        {
+            object.Visible = false;
+        }
+
+        std::vector<UINT> visibleIndices;
+        visibleIndices.reserve(m_sceneObjects.size());
+        QueryOctreeVisible(m_octreeRoot, frustum, visibleIndices);
+
+        for (UINT objectIndex : visibleIndices)
+        {
+            if (objectIndex < m_sceneObjects.size())
+            {
+                m_sceneObjects[objectIndex].Visible = true;
+            }
+        }
+        return;
+    }
+
+    for (SceneObject& object : m_sceneObjects)
+    {
+        object.Visible = IntersectsFrustum(object.BoundsWorld, frustum);
+    }
+}
+
+void D3D12Context::BuildOctree()
+{
+    m_octreeNodes.clear();
+    m_octreeRoot = -1;
+
+    if (m_sceneObjects.empty())
+    {
+        return;
+    }
+
+    std::vector<UINT> objectIndices;
+    objectIndices.reserve(m_sceneObjects.size());
+    for (UINT i = 0; i < static_cast<UINT>(m_sceneObjects.size()); ++i)
+    {
+        objectIndices.push_back(i);
+    }
+
+    BoundingBox rootBounds{};
+    rootBounds.Min = m_sceneBoundsMin;
+    rootBounds.Max = m_sceneBoundsMax;
+    m_octreeRoot = BuildOctreeNode(rootBounds, objectIndices, 0);
+}
+
+int D3D12Context::BuildOctreeNode(const BoundingBox& bounds, const std::vector<UINT>& objectIndices, UINT depth)
+{
+    const int nodeIndex = static_cast<int>(m_octreeNodes.size());
+    m_octreeNodes.emplace_back();
+    m_octreeNodes[nodeIndex].Bounds = bounds;
+    m_octreeNodes[nodeIndex].ObjectIndices = objectIndices;
+
+    if (depth >= OctreeMaxDepth || objectIndices.size() <= OctreeMaxObjectsPerNode)
+    {
+        return nodeIndex;
+    }
+
+    const XMFLOAT3 center(
+        0.5f * (bounds.Min.x + bounds.Max.x),
+        0.5f * (bounds.Min.y + bounds.Max.y),
+        0.5f * (bounds.Min.z + bounds.Max.z));
+
+    const float extentX = bounds.Max.x - bounds.Min.x;
+    const float extentY = bounds.Max.y - bounds.Min.y;
+    const float extentZ = bounds.Max.z - bounds.Min.z;
+    if (extentX <= 1.0e-3f || extentY <= 1.0e-3f || extentZ <= 1.0e-3f)
+    {
+        return nodeIndex;
+    }
+
+    std::array<BoundingBox, 8> childBounds{};
+    for (UINT child = 0; child < 8; ++child)
+    {
+        BoundingBox childBox{};
+        childBox.Min.x = (child & 1u) ? center.x : bounds.Min.x;
+        childBox.Max.x = (child & 1u) ? bounds.Max.x : center.x;
+        childBox.Min.y = (child & 2u) ? center.y : bounds.Min.y;
+        childBox.Max.y = (child & 2u) ? bounds.Max.y : center.y;
+        childBox.Min.z = (child & 4u) ? center.z : bounds.Min.z;
+        childBox.Max.z = (child & 4u) ? bounds.Max.z : center.z;
+        childBounds[child] = childBox;
+    }
+
+    std::array<std::vector<UINT>, 8> childObjects;
+    std::vector<UINT> remainingObjects;
+    remainingObjects.reserve(objectIndices.size());
+
+    for (UINT objectIndex : objectIndices)
+    {
+        const BoundingBox& objectBounds = m_sceneObjects[objectIndex].BoundsWorld;
+        int targetChild = -1;
+
+        for (UINT child = 0; child < 8; ++child)
+        {
+            if (ContainsBounds(childBounds[child], objectBounds))
+            {
+                targetChild = static_cast<int>(child);
+                break;
+            }
+        }
+
+        if (targetChild >= 0)
+        {
+            childObjects[targetChild].push_back(objectIndex);
+        }
+        else
+        {
+            remainingObjects.push_back(objectIndex);
+        }
+    }
+
+    bool createdChild = false;
+    m_octreeNodes[nodeIndex].ObjectIndices = std::move(remainingObjects);
+
+    for (UINT child = 0; child < 8; ++child)
+    {
+        if (childObjects[child].empty())
+        {
+            continue;
+        }
+
+        m_octreeNodes[nodeIndex].Children[child] = BuildOctreeNode(childBounds[child], childObjects[child], depth + 1);
+        createdChild = true;
+    }
+
+    m_octreeNodes[nodeIndex].IsLeaf = !createdChild;
+    return nodeIndex;
+}
+
+void D3D12Context::QueryOctreeVisible(int nodeIndex, const Frustum& frustum, std::vector<UINT>& visibleIndices) const
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(m_octreeNodes.size()))
+    {
+        return;
+    }
+
+    const OctreeNode& node = m_octreeNodes[nodeIndex];
+    if (!IntersectsFrustum(node.Bounds, frustum))
+    {
+        return;
+    }
+
+    for (UINT objectIndex : node.ObjectIndices)
+    {
+        if (objectIndex < m_sceneObjects.size() &&
+            IntersectsFrustum(m_sceneObjects[objectIndex].BoundsWorld, frustum))
+        {
+            visibleIndices.push_back(objectIndex);
+        }
+    }
+
+    if (node.IsLeaf)
+    {
+        return;
+    }
+
+    for (int childIndex : node.Children)
+    {
+        if (childIndex >= 0)
+        {
+            QueryOctreeVisible(childIndex, frustum, visibleIndices);
+        }
+    }
+}
+
+Frustum D3D12Context::BuildCameraFrustum() const
+{
+    const XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
+    const XMVECTOR target = XMLoadFloat3(&m_cameraTarget);
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    const XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(
+        XM_PIDIV4,
+        static_cast<float>(m_width) / static_cast<float>(m_height),
+        1.0f,
+        20000.0f);
+    const XMMATRIX viewProj = XMMatrixMultiply(view, proj);
+
+    XMFLOAT4X4 m{};
+    XMStoreFloat4x4(&m, viewProj);
+
+    Frustum frustum{};
+    frustum.Planes[0] = NormalizePlane(XMFLOAT4(m._14 + m._11, m._24 + m._21, m._34 + m._31, m._44 + m._41));
+    frustum.Planes[1] = NormalizePlane(XMFLOAT4(m._14 - m._11, m._24 - m._21, m._34 - m._31, m._44 - m._41));
+    frustum.Planes[2] = NormalizePlane(XMFLOAT4(m._14 - m._12, m._24 - m._22, m._34 - m._32, m._44 - m._42));
+    frustum.Planes[3] = NormalizePlane(XMFLOAT4(m._14 + m._12, m._24 + m._22, m._34 + m._32, m._44 + m._42));
+    frustum.Planes[4] = NormalizePlane(XMFLOAT4(m._13, m._23, m._33, m._43));
+    frustum.Planes[5] = NormalizePlane(XMFLOAT4(m._14 - m._13, m._24 - m._23, m._34 - m._33, m._44 - m._43));
+    return frustum;
+}
+
+XMFLOAT4 D3D12Context::NormalizePlane(const XMFLOAT4& plane) const
+{
+    const float length = std::sqrt(plane.x * plane.x + plane.y * plane.y + plane.z * plane.z);
+    if (length <= 1.0e-6f)
+    {
+        return plane;
+    }
+
+    const float invLength = 1.0f / length;
+    return XMFLOAT4(
+        plane.x * invLength,
+        plane.y * invLength,
+        plane.z * invLength,
+        plane.w * invLength);
+}
+
+bool D3D12Context::IntersectsFrustum(const BoundingBox& bounds, const Frustum& frustum) const
+{
+    for (const XMFLOAT4& plane : frustum.Planes)
+    {
+        XMFLOAT3 positiveVertex{};
+        positiveVertex.x = (plane.x >= 0.0f) ? bounds.Max.x : bounds.Min.x;
+        positiveVertex.y = (plane.y >= 0.0f) ? bounds.Max.y : bounds.Min.y;
+        positiveVertex.z = (plane.z >= 0.0f) ? bounds.Max.z : bounds.Min.z;
+
+        const float distance =
+            plane.x * positiveVertex.x +
+            plane.y * positiveVertex.y +
+            plane.z * positiveVertex.z +
+            plane.w;
+
+        if (distance < 0.0f)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool D3D12Context::ContainsBounds(const BoundingBox& outer, const BoundingBox& inner) const
+{
+    return
+        inner.Min.x >= outer.Min.x && inner.Max.x <= outer.Max.x &&
+        inner.Min.y >= outer.Min.y && inner.Max.y <= outer.Max.y &&
+        inner.Min.z >= outer.Min.z && inner.Max.z <= outer.Max.z;
+}
+
+BoundingBox D3D12Context::TransformBoundingBox(const BoundingBox& localBounds, const XMFLOAT4X4& worldMatrix) const
+{
+    const XMFLOAT3 corners[8] =
+    {
+        XMFLOAT3(localBounds.Min.x, localBounds.Min.y, localBounds.Min.z),
+        XMFLOAT3(localBounds.Max.x, localBounds.Min.y, localBounds.Min.z),
+        XMFLOAT3(localBounds.Min.x, localBounds.Max.y, localBounds.Min.z),
+        XMFLOAT3(localBounds.Max.x, localBounds.Max.y, localBounds.Min.z),
+        XMFLOAT3(localBounds.Min.x, localBounds.Min.y, localBounds.Max.z),
+        XMFLOAT3(localBounds.Max.x, localBounds.Min.y, localBounds.Max.z),
+        XMFLOAT3(localBounds.Min.x, localBounds.Max.y, localBounds.Max.z),
+        XMFLOAT3(localBounds.Max.x, localBounds.Max.y, localBounds.Max.z)
+    };
+
+    BoundingBox transformed{};
+    transformed.Min = XMFLOAT3(
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)());
+    transformed.Max = XMFLOAT3(
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)());
+
+    const XMMATRIX world = XMLoadFloat4x4(&worldMatrix);
+    for (const XMFLOAT3& corner : corners)
+    {
+        const XMVECTOR point = XMVector3TransformCoord(XMLoadFloat3(&corner), world);
+        XMFLOAT3 transformedPoint{};
+        XMStoreFloat3(&transformedPoint, point);
+
+        transformed.Min.x = (std::min)(transformed.Min.x, transformedPoint.x);
+        transformed.Min.y = (std::min)(transformed.Min.y, transformedPoint.y);
+        transformed.Min.z = (std::min)(transformed.Min.z, transformedPoint.z);
+        transformed.Max.x = (std::max)(transformed.Max.x, transformedPoint.x);
+        transformed.Max.y = (std::max)(transformed.Max.y, transformedPoint.y);
+        transformed.Max.z = (std::max)(transformed.Max.z, transformedPoint.z);
+    }
+
+    return transformed;
+}
+
+void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex)
+{
+    if (m_cbMappedData == nullptr)
+    {
+        return;
+    }
 
     XMVECTOR cameraPos = XMLoadFloat3(&m_cameraPos);
     XMVECTOR cameraTarget = XMLoadFloat3(&m_cameraTarget);
@@ -401,6 +850,7 @@ void D3D12Context::UpdateCB()
             1.0f,
             20000.0f);
 
+    const XMMATRIX world = XMLoadFloat4x4(&worldMatrix);
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&m_cbData.View, XMMatrixTranspose(view));
     XMStoreFloat4x4(&m_cbData.Proj, XMMatrixTranspose(proj));
@@ -426,7 +876,11 @@ void D3D12Context::UpdateCB()
         m_cbData.TessellationParams = XMFLOAT4(0.0f, 1.0f, 1.0f, 1.0f);
     }
 
-    memcpy(m_cbMappedData, &m_cbData, sizeof(PerObjectCB));
+    const UINT safeIndex = (std::min)(objectIndex, MaxSceneObjects - 1);
+    std::memcpy(
+        m_cbMappedData + size_t(safeIndex) * size_t(m_constantBufferStride),
+        &m_cbData,
+        sizeof(PerObjectCB));
 }
 
 // CPU ждет GPU
@@ -815,20 +1269,15 @@ bool D3D12Context::CreateSolidColorTexture(UINT32 rgba, UINT srvIndex)
 
 bool D3D12Context::CreateDevice()
 {
-#if defined(_DEBUG)
+    if (FAILED(D3D12CreateDevice(
+        nullptr,
+        D3D_FEATURE_LEVEL_11_0,
+        IID_PPV_ARGS(&m_device))))
     {
-        ComPtr<ID3D12Debug> debug;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
-        {
-            debug->EnableDebugLayer();
-        }
+        return false;
     }
-#endif
 
-return SUCCEEDED(D3D12CreateDevice(
-    nullptr,
-    D3D_FEATURE_LEVEL_11_0,
-    IID_PPV_ARGS(&m_device)));
+    return true;
 }
 
 // отправка команд
@@ -1334,8 +1783,10 @@ bool D3D12Context::CreateGeometry()
     m_ibView.SizeInBytes = ibSize;
     m_ibView.Format = DXGI_FORMAT_R16_UINT;
 
-    m_sceneBoundsMin = XMFLOAT3(-1.0f, -1.0f, -1.0f);
-    m_sceneBoundsMax = XMFLOAT3(1.0f, 1.0f, 1.0f);
+    m_modelBoundsLocal.Min = XMFLOAT3(-1.0f, -1.0f, -1.0f);
+    m_modelBoundsLocal.Max = XMFLOAT3(1.0f, 1.0f, 1.0f);
+    m_sceneBoundsMin = m_modelBoundsLocal.Min;
+    m_sceneBoundsMax = m_modelBoundsLocal.Max;
 
     return true;
 }
@@ -1541,8 +1992,10 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
         maxZ = (v.p.z > maxZ) ? v.p.z : maxZ;
     }
 
-    m_sceneBoundsMin = XMFLOAT3(minX, minY, minZ);
-    m_sceneBoundsMax = XMFLOAT3(maxX, maxY, maxZ);
+    m_modelBoundsLocal.Min = XMFLOAT3(minX, minY, minZ);
+    m_modelBoundsLocal.Max = XMFLOAT3(maxX, maxY, maxZ);
+    m_sceneBoundsMin = m_modelBoundsLocal.Min;
+    m_sceneBoundsMax = m_modelBoundsLocal.Max;
 
     // сборка индекс буфера
     m_submeshes.clear();
@@ -1676,7 +2129,8 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
 // константный буфер
 bool D3D12Context::CreateConstantBuffer()
 {
-    UINT cbSize = (sizeof(PerObjectCB) + 255) & ~255u;
+    m_constantBufferStride = (sizeof(PerObjectCB) + 255) & ~255u;
+    const UINT64 cbSize = UINT64(m_constantBufferStride) * UINT64(MaxSceneObjects);
 
     D3D12_HEAP_PROPERTIES upload{};
     upload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1706,6 +2160,7 @@ bool D3D12Context::CreateConstantBuffer()
     if (FAILED(m_constantBuffer->Map(0, &readRange, (void**)&m_cbMappedData)))
         return false;
 
+    std::memset(m_cbMappedData, 0, static_cast<size_t>(cbSize));
     std::memcpy(m_cbMappedData, &m_cbData, sizeof(PerObjectCB));
     return true;
 }
@@ -1747,7 +2202,8 @@ void D3D12Context::EndFrame()
 
 void D3D12Context::UpdateSceneConstants()
 {
-    UpdateCB();
+    static const XMFLOAT4X4 identity = MakeIdentityMatrix();
+    UpdateCB(identity, 0);
 }
 
 void D3D12Context::DrawSceneGeometry(
@@ -1759,6 +2215,8 @@ void D3D12Context::DrawSceneGeometry(
     {
         return;
     }
+
+    UpdateObjectVisibility();
 
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
@@ -1780,20 +2238,48 @@ void D3D12Context::DrawSceneGeometry(
     roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
     commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
 
-    if (!m_submeshes.empty())
+    const auto drawSubmeshes = [&](UINT textureSrvIndex)
     {
-        for (const auto& sm : m_submeshes)
+        if (!m_submeshes.empty())
+        {
+            for (const auto& sm : m_submeshes)
+            {
+                const UINT resolvedSrvIndex = (textureSrvIndex == UINT_MAX) ? sm.SrvIndex : textureSrvIndex;
+                D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
+                textureHandle.ptr += SIZE_T(resolvedSrvIndex) * SIZE_T(m_srvDescriptorSize);
+                commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, textureHandle);
+                commandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
+            }
+        }
+        else
         {
             D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
-            textureHandle.ptr += SIZE_T(sm.SrvIndex) * SIZE_T(m_srvDescriptorSize);
+            textureHandle.ptr += SIZE_T((textureSrvIndex == UINT_MAX) ? 0u : textureSrvIndex) * SIZE_T(m_srvDescriptorSize);
             commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, textureHandle);
-            commandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
+            commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
         }
-    }
-    else
+    };
+
+    if (m_sceneObjects.empty())
     {
-        commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, baseGpu);
-        commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
+        static const XMFLOAT4X4 identity = MakeIdentityMatrix();
+        UpdateCB(identity, 0);
+        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(0));
+        drawSubmeshes(UINT_MAX);
+        return;
+    }
+
+    for (UINT objectIndex = 0; objectIndex < static_cast<UINT>(m_sceneObjects.size()); ++objectIndex)
+    {
+        const SceneObject& object = m_sceneObjects[objectIndex];
+        if (!object.Visible)
+        {
+            continue;
+        }
+
+        UpdateCB(object.World, objectIndex);
+        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
+        drawSubmeshes(object.DiffuseSrvIndex);
     }
 }
 
@@ -1817,9 +2303,10 @@ ID3D12RootSignature* D3D12Context::GetSceneRootSignature() const
     return m_rootSignature.Get();
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS D3D12Context::GetSceneConstantBufferAddress() const
+D3D12_GPU_VIRTUAL_ADDRESS D3D12Context::GetSceneConstantBufferAddress(UINT objectIndex) const
 {
-    return m_constantBuffer->GetGPUVirtualAddress();
+    const UINT safeIndex = (std::min)(objectIndex, MaxSceneObjects - 1);
+    return m_constantBuffer->GetGPUVirtualAddress() + UINT64(safeIndex) * UINT64(m_constantBufferStride);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Context::GetCurrentBackBufferRTV() const
@@ -1944,6 +2431,41 @@ void D3D12Context::Shutdown()
         CloseHandle(m_fenceEvent);
         m_fenceEvent = nullptr;
     }
+
+    m_sceneObjects.clear();
+    m_octreeNodes.clear();
+    m_octreeRoot = -1;
+    m_submeshes.clear();
+    m_materialDiffusePaths.clear();
+    m_materialToSrv.clear();
+
+    m_textures.clear();
+    m_textureUploads.clear();
+
+    m_vertexBuffer.Reset();
+    m_indexBuffer.Reset();
+    m_constantBuffer.Reset();
+    m_depthBuffer.Reset();
+    for (UINT i = 0; i < FrameCount; ++i)
+    {
+        m_backBuffers[i].Reset();
+        m_commandAllocators[i].Reset();
+    }
+
+    m_srvHeap.Reset();
+    m_rtvHeap.Reset();
+    m_dsvHeap.Reset();
+    m_rootSignature.Reset();
+    m_pso.Reset();
+    m_vs.Reset();
+    m_hs.Reset();
+    m_ds.Reset();
+    m_ps.Reset();
+    m_commandList.Reset();
+    m_swapChain.Reset();
+    m_commandQueue.Reset();
+    m_fence.Reset();
+    m_device.Reset();
 }
 
 // заверщение работы
