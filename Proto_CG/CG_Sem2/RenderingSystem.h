@@ -46,6 +46,7 @@ public:
         bool dolly,
         float mouseDeltaX,
         float mouseDeltaY);
+    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed);
 
     void RenderFrame();
 

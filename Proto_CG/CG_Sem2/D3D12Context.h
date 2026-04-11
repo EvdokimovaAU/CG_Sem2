@@ -6,30 +6,29 @@
 #include <wrl.h>
 #include <array>
 #include <string>
-#include <vector>             
+#include <vector>
+
 #include "tiny_obj_loader.h"
 #include <d3dcompiler.h>
+
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
-using Microsoft::WRL::ComPtr;
 
-// параметры модели, камеры и текстуры
 struct PerObjectCB
 {
     XMFLOAT4X4 World;
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
-    XMFLOAT4 UVTransform; // для тайлинга и офсета 
+    XMFLOAT4 UVTransform;
     XMFLOAT4 TimeParams;
     XMFLOAT4 TessellationParams;
 };
 
-// кусок модели 1 матреиалом
 struct Submesh
 {
     UINT IndexStart = 0;
     UINT IndexCount = 0;
-    int  MaterialId = -1;
+    int MaterialId = -1;
     UINT SrvIndex = 0;
 };
 
@@ -37,6 +36,20 @@ struct BoundingBox
 {
     XMFLOAT3 Min = { 0.0f, 0.0f, 0.0f };
     XMFLOAT3 Max = { 0.0f, 0.0f, 0.0f };
+};
+
+struct MeshData
+{
+    ComPtr<ID3D12Resource> VertexBuffer;
+    ComPtr<ID3D12Resource> IndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW VbView{};
+    D3D12_INDEX_BUFFER_VIEW IbView{};
+    UINT IndexCount = 0;
+    bool Use32BitIndices = false;
+    std::vector<Submesh> Submeshes;
+    BoundingBox BoundsLocal{};
+    UINT DiffuseSrvIndex = UINT_MAX;
+    UINT NormalSrvIndex = UINT_MAX;
 };
 
 struct SceneObject
@@ -94,10 +107,15 @@ public:
         UINT textureRootParameterIndex,
         UINT displacementRootParameterIndex = UINT_MAX);
 
-    void UpdateCameraOrbit(float deltaTime,
-        float rotateSpeed, float dollySpeed,
-        bool orbitRotate, bool dolly,
-        float mouseDeltaX, float mouseDeltaY);
+    void UpdateCameraOrbit(
+        float deltaTime,
+        float rotateSpeed,
+        float dollySpeed,
+        bool orbitRotate,
+        bool dolly,
+        float mouseDeltaX,
+        float mouseDeltaY);
+    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed);
 
     ID3D12Device* GetDevice() const;
     ID3D12GraphicsCommandList* GetCommandList() const;
@@ -120,12 +138,6 @@ public:
     float GetTime() const;
 
 private:
-
-    float   m_time = 0.0f; // текущее время сцены
-
-    XMFLOAT2 m_uvTiling = { 1.0f, 1.0f }; // тайлинг
-    XMFLOAT2 m_uvScrollSpeed = { 0.0f, 0.0f }; // скорость движения текстуры
-
     bool CreateDevice();
     bool CreateCommandObjects();
     bool CreateSwapChain(HWND hwnd);
@@ -143,7 +155,7 @@ private:
     bool CreateSolidColorTexture(UINT32 rgba, UINT srvIndex);
     bool CreateSRVHeap(UINT numDescriptors);
 
-    void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex);
+    void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex = 0);
     void BuildSceneObjects();
     void UpdateObjectVisibility();
     void BuildOctree();
@@ -154,6 +166,9 @@ private:
     bool IntersectsFrustum(const BoundingBox& bounds, const Frustum& frustum) const;
     bool ContainsBounds(const BoundingBox& outer, const BoundingBox& inner) const;
     BoundingBox TransformBoundingBox(const BoundingBox& localBounds, const DirectX::XMFLOAT4X4& worldMatrix) const;
+    MeshData CaptureCurrentMesh() const;
+    void ApplyMesh(const MeshData& mesh);
+    UINT SelectCrowdLodIndex(const SceneObject& object) const;
     void WaitForFrame(UINT frameIndex);
     UINT64 SignalCurrentFrame();
     void WaitForGPU();
@@ -162,8 +177,8 @@ private:
     UINT m_width = 0;
     UINT m_height = 0;
 
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textureUploads;
+    std::vector<ComPtr<ID3D12Resource>> m_textures;
+    std::vector<ComPtr<ID3D12Resource>> m_textureUploads;
 
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGISwapChain3> m_swapChain;
@@ -206,29 +221,27 @@ private:
     UINT m_constantBufferStride = 0;
     static constexpr UINT MaxSceneObjects = 2048;
 
-    float m_rotationT = 0.f;
+    float m_time = 0.0f;
+    float m_rotationT = 0.0f;
 
-    // обзор каемры
+    XMFLOAT2 m_uvTiling = { 1.0f, 1.0f };
+    XMFLOAT2 m_uvScrollSpeed = { 0.0f, 0.0f };
+
     DirectX::XMFLOAT3 m_cameraTarget = { 0.0f, 220.0f, 0.0f };
     float m_cameraDistance = 1150.0f;
     float m_cameraYaw = 0.0f;
     float m_cameraPitch = -0.22f;
-
-    // расположение камеры
     XMFLOAT3 m_cameraPos = { 0.0f, 420.0f, -1150.0f };
 
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     UINT m_srvDescriptorSize = 0;
 
-    // диапазоны индексов по материалам
     std::vector<Submesh> m_submeshes;
+    std::vector<MeshData> m_lodMeshes;
     std::vector<SceneObject> m_sceneObjects;
-
-    // текстуры материалов из MTL 
     std::vector<std::string> m_materialDiffusePaths;
-
-    // материал 
     std::vector<UINT> m_materialToSrv;
+
     BoundingBox m_modelBoundsLocal{};
     DirectX::XMFLOAT3 m_sceneBoundsMin = { -1.0f, -1.0f, -1.0f };
     DirectX::XMFLOAT3 m_sceneBoundsMax = { 1.0f, 1.0f, 1.0f };

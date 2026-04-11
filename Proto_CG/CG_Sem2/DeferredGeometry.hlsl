@@ -114,15 +114,18 @@ float3x3 ComputeTBN(float3 normalW, float3 worldPos, float2 uv)
     return float3x3(tangent * invMax, bitangent * invMax, normalW);
 }
 
-float4 SampleAntiAliased(Texture2D tex, float2 uv)
+float4 SampleByLodStrength(Texture2D tex, float2 uv, float filterStrength)
 {
+    if (filterStrength <= 0.001f)
+    {
+        return tex.SampleLevel(gSampler, uv, 0.0f);
+    }
+
     float2 du = ddx(uv);
     float2 dv = ddy(uv);
-    float footprint = max(length(du), length(dv));
-    float filterAmount = saturate(footprint * 512.0f);
-    float2 offset = (abs(du) + abs(dv)) * 0.35f;
+    float2 offset = (abs(du) + abs(dv)) * lerp(0.0f, 1.35f, filterStrength);
 
-    float4 baseSample = tex.Sample(gSampler, uv);
+    float4 baseSample = tex.SampleLevel(gSampler, uv, 0.0f);
     float4 blurred =
         tex.Sample(gSampler, uv + float2( offset.x,  offset.y)) +
         tex.Sample(gSampler, uv + float2(-offset.x,  offset.y)) +
@@ -130,7 +133,7 @@ float4 SampleAntiAliased(Texture2D tex, float2 uv)
         tex.Sample(gSampler, uv + float2(-offset.x, -offset.y));
     blurred *= 0.25f;
 
-    return lerp(baseSample, blurred, filterAmount);
+    return lerp(baseSample, blurred, saturate(filterStrength * 1.15f));
 }
 
 [domain("tri")]
@@ -168,10 +171,11 @@ GBufferOutput PSMain(PSInput input)
     GBufferOutput o;
 
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
-    float4 albedo = SampleAntiAliased(gTex, uv);
+    const float lodFilterStrength = saturate(TimeParams.y);
+    float4 albedo = SampleByLodStrength(gTex, uv, lodFilterStrength);
     albedo.rgb = saturate(pow(albedo.rgb, 1.08f) * 0.82f);
-    float roughness = SampleAntiAliased(gRoughnessTex, uv).r;
-    float3 normalSample = SampleAntiAliased(gNormalTex, uv).xyz * 2.0f - 1.0f;
+    float roughness = SampleByLodStrength(gRoughnessTex, uv, lodFilterStrength).r;
+    float3 normalSample = SampleByLodStrength(gNormalTex, uv, lodFilterStrength).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
     float3x3 tbn = ComputeTBN(normalize(input.NormalW), input.WorldPos, uv);
     float3 normal = normalize(mul(normalSample, tbn));

@@ -184,6 +184,11 @@ void RenderingSystem::UpdateCameraOrbit(
         mouseDeltaY);
 }
 
+void RenderingSystem::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed)
+{
+    m_context.UpdateCameraMove(deltaTime, forwardInput, strafeInput, moveSpeed);
+}
+
 // выбирает способ отрисовки
 void RenderingSystem::RenderFrame()
 {
@@ -951,6 +956,22 @@ void RenderingSystem::UpdateLightingConstants()
             spotRange);
         cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.22f, -0.95f, 0.18f, 0.82f);
         cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 8.00f);
+    }
+    else if (m_context.GetCurrentScene() == Scene::ChickenField)
+    {
+        const float pointRange = (std::max)(dominantExtent * 0.60f, 420.0f);
+
+        cb.LightDirection = XMFLOAT4(0.62f, -1.0f, -0.26f, 0.0f);
+        cb.LightColor = XMFLOAT4(0.58f, 0.52f, 0.46f, 1.10f);
+        cb.AmbientColor = XMFLOAT4(0.020f, 0.018f, 0.017f, 1.0f);
+        cb.LightCounts = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
+
+        cb.PointLightPositionRange[0] = XMFLOAT4(
+            sceneCenter.x + sceneExtents.x * 0.85f,
+            sceneCenter.y + sceneExtents.y * 0.80f,
+            sceneCenter.z - sceneExtents.z * 0.75f,
+            pointRange);
+        cb.PointLightColorIntensity[0] = XMFLOAT4(0.72f, 0.58f, 0.46f, 0.85f);
     }
     else
     {

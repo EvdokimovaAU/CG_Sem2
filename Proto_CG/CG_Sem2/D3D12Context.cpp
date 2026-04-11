@@ -175,6 +175,7 @@ bool D3D12Context::LoadScene(Scene scene)
     m_textures.clear();
     m_textureUploads.clear();
     m_submeshes.clear();
+    m_lodMeshes.clear();
     m_materialDiffusePaths.clear();
     m_materialToSrv.clear();
     m_sceneObjects.clear();
@@ -202,7 +203,42 @@ bool D3D12Context::LoadScene(Scene scene)
     if (!CreateSolidColorTexture(0xffffffffu, 127))
         return false;
 
-    bool modelLoaded = LoadModelFromOBJ(objPath.string().c_str(), mtlDir.c_str());
+    bool modelLoaded = false;
+    if (isCrowdScene)
+    {
+        static const std::array<const char*, 3> kCrowdLodFiles =
+        {
+            "Pnik_4096.obj",
+            "Pnik_2048.obj",
+            "Pnik_1024.obj"
+        };
+
+        m_lodMeshes.clear();
+        m_lodMeshes.reserve(kCrowdLodFiles.size());
+
+        for (const char* lodFile : kCrowdLodFiles)
+        {
+            const fs::path lodPath = modelsDir / lodFile;
+            if (!LoadModelFromOBJ(lodPath.string().c_str(), mtlDir.c_str()))
+            {
+                m_lodMeshes.clear();
+                modelLoaded = false;
+                break;
+            }
+
+            m_lodMeshes.push_back(CaptureCurrentMesh());
+            modelLoaded = true;
+        }
+
+        if (modelLoaded && !m_lodMeshes.empty())
+        {
+            ApplyMesh(m_lodMeshes.front());
+        }
+    }
+    else
+    {
+        modelLoaded = LoadModelFromOBJ(objPath.string().c_str(), mtlDir.c_str());
+    }
 
     if (!modelLoaded)
     {
@@ -259,19 +295,50 @@ bool D3D12Context::LoadScene(Scene scene)
     }
     else if (isCrowdScene)
     {
-        const std::string crowdDiffusePath = (modelsDir / "Dracula_texture.png").string();
-
-        m_baseColorSrvIndex = 125;
-        if (CreateTextureFromFile(crowdDiffusePath.c_str(), m_baseColorSrvIndex))
+        static const std::array<const char*, 3> kCrowdDiffuseFiles =
         {
-            for (auto& sm : m_submeshes)
+            "Pnik_4096_diffuse.png",
+            "Pnik_2048_diffuse.png",
+            "Pnik_1024_diffuse.png"
+        };
+        static const std::array<const char*, 3> kCrowdNormalFiles =
+        {
+            "Pnik_4096_normal.png",
+            "Pnik_2048_normal.png",
+            "Pnik_1024_normal.png"
+        };
+        static const std::array<UINT, 3> kCrowdDiffuseSlots = { 120u, 121u, 122u };
+        static const std::array<UINT, 3> kCrowdNormalSlots = { 116u, 117u, 118u };
+
+        for (size_t lodIndex = 0; lodIndex < m_lodMeshes.size() && lodIndex < kCrowdDiffuseFiles.size(); ++lodIndex)
+        {
+            MeshData& mesh = m_lodMeshes[lodIndex];
+            const std::string diffusePath = (modelsDir / kCrowdDiffuseFiles[lodIndex]).string();
+            const std::string normalPath = (modelsDir / kCrowdNormalFiles[lodIndex]).string();
+
+            mesh.DiffuseSrvIndex = 0;
+            mesh.NormalSrvIndex = 126;
+
+            if (CreateTextureFromFile(diffusePath.c_str(), kCrowdDiffuseSlots[lodIndex]))
             {
-                sm.SrvIndex = m_baseColorSrvIndex;
+                mesh.DiffuseSrvIndex = kCrowdDiffuseSlots[lodIndex];
+                for (auto& sm : mesh.Submeshes)
+                {
+                    sm.SrvIndex = mesh.DiffuseSrvIndex;
+                }
+            }
+
+            if (CreateTextureFromFile(normalPath.c_str(), kCrowdNormalSlots[lodIndex]))
+            {
+                mesh.NormalSrvIndex = kCrowdNormalSlots[lodIndex];
             }
         }
-        else
+
+        if (!m_lodMeshes.empty())
         {
-            m_baseColorSrvIndex = 0;
+            ApplyMesh(m_lodMeshes.front());
+            m_baseColorSrvIndex = m_lodMeshes.front().DiffuseSrvIndex;
+            m_normalMapSrvIndex = m_lodMeshes.front().NormalSrvIndex;
         }
     }
     BuildSceneObjects();
@@ -358,6 +425,49 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
     XMStoreFloat3(&m_cameraPos, eye);
 }
 
+void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed)
+{
+    if (std::abs(forwardInput) <= 1.0e-4f && std::abs(strafeInput) <= 1.0e-4f)
+    {
+        return;
+    }
+
+    XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
+    XMVECTOR target = XMLoadFloat3(&m_cameraTarget);
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    XMVECTOR forward = XMVectorSubtract(target, eye);
+    forward = XMVectorSetY(forward, 0.0f);
+
+    if (XMVectorGetX(XMVector3LengthSq(forward)) <= 1.0e-6f)
+    {
+        forward = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+    else
+    {
+        forward = XMVector3Normalize(forward);
+    }
+
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, forward));
+    XMVECTOR move = XMVectorAdd(
+        XMVectorScale(forward, forwardInput),
+        XMVectorScale(right, strafeInput));
+
+    if (XMVectorGetX(XMVector3LengthSq(move)) <= 1.0e-6f)
+    {
+        return;
+    }
+
+    move = XMVector3Normalize(move);
+    move = XMVectorScale(move, moveSpeed * deltaTime);
+
+    eye = XMVectorAdd(eye, move);
+    target = XMVectorAdd(target, move);
+
+    XMStoreFloat3(&m_cameraPos, eye);
+    XMStoreFloat3(&m_cameraTarget, target);
+}
+
 // рендер 
 void D3D12Context::Render(float r, float g, float b, float a)
 {
@@ -411,7 +521,7 @@ void D3D12Context::Render(float r, float g, float b, float a)
     roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
     m_commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
 
-    // 11) Геометрия
+    // геометрия
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vbView);
     m_commandList->IASetIndexBuffer(&m_ibView);
@@ -449,7 +559,7 @@ void D3D12Context::Render(float r, float g, float b, float a)
     SignalCurrentFrame();
     m_swapChain->Present(1, 0);
 
-    // 15) Стабильно, но медленно
+    
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 }
 
@@ -458,7 +568,10 @@ void D3D12Context::BuildSceneObjects()
 {
     m_sceneObjects.clear();
 
-    const BoundingBox localBounds = m_modelBoundsLocal;
+    const BoundingBox localBounds =
+        (!m_lodMeshes.empty() && m_currentScene == Scene::ChickenField)
+        ? m_lodMeshes.front().BoundsLocal
+        : m_modelBoundsLocal;
     if (m_currentScene != Scene::ChickenField)
     {
         SceneObject object{};
@@ -473,14 +586,14 @@ void D3D12Context::BuildSceneObjects()
         return;
     }
 
-    const UINT gridX = 30;
-    const UINT gridZ = 30;
-    const float crowdScale = 28.0f;
+    const UINT gridX = 10;
+    const UINT gridZ = 10;
+    const float crowdScale = 24.0f;
     const float modelWidth = (std::max)((localBounds.Max.x - localBounds.Min.x) * crowdScale, 1.0f);
     const float modelDepth = (std::max)((localBounds.Max.z - localBounds.Min.z) * crowdScale, 1.0f);
     const float modelHeight = (std::max)((localBounds.Max.y - localBounds.Min.y) * crowdScale, 1.0f);
-    const float spacingX = (std::max)(modelWidth * 1.28f, 16.0f);
-    const float spacingZ = (std::max)(modelDepth * 1.28f, 16.0f);
+    const float spacingX = (std::max)(modelWidth * 1.18f, 14.0f);
+    const float spacingZ = (std::max)(modelDepth * 1.18f, 14.0f);
     const float startX = -0.5f * spacingX * static_cast<float>(gridX - 1);
     const float startZ = -0.5f * spacingZ * static_cast<float>(gridZ - 1);
     const float worldY = -localBounds.Min.y * crowdScale;
@@ -525,6 +638,8 @@ void D3D12Context::BuildSceneObjects()
     m_sceneBoundsMax = sceneMax;
 }
 
+
+// проверка видимости
 void D3D12Context::UpdateObjectVisibility()
 {
     if (m_sceneObjects.empty())
@@ -570,6 +685,7 @@ void D3D12Context::UpdateObjectVisibility()
     }
 }
 
+// окто дерево всей сцены
 void D3D12Context::BuildOctree()
 {
     m_octreeNodes.clear();
@@ -593,6 +709,7 @@ void D3D12Context::BuildOctree()
     m_octreeRoot = BuildOctreeNode(rootBounds, objectIndices, 0);
 }
 
+// делит подпространство
 int D3D12Context::BuildOctreeNode(const BoundingBox& bounds, const std::vector<UINT>& objectIndices, UINT depth)
 {
     const int nodeIndex = static_cast<int>(m_octreeNodes.size());
@@ -677,6 +794,7 @@ int D3D12Context::BuildOctreeNode(const BoundingBox& bounds, const std::vector<U
     return nodeIndex;
 }
 
+// обход дерева, если включен frustum
 void D3D12Context::QueryOctreeVisible(int nodeIndex, const Frustum& frustum, std::vector<UINT>& visibleIndices) const
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(m_octreeNodes.size()))
@@ -713,6 +831,7 @@ void D3D12Context::QueryOctreeVisible(int nodeIndex, const Frustum& frustum, std
     }
 }
 
+// стоим frustum из текущих матриц камеры 
 Frustum D3D12Context::BuildCameraFrustum() const
 {
     const XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
@@ -740,6 +859,7 @@ Frustum D3D12Context::BuildCameraFrustum() const
     return frustum;
 }
 
+// нормализует плоскости для корректной проверки
 XMFLOAT4 D3D12Context::NormalizePlane(const XMFLOAT4& plane) const
 {
     const float length = std::sqrt(plane.x * plane.x + plane.y * plane.y + plane.z * plane.z);
@@ -756,6 +876,7 @@ XMFLOAT4 D3D12Context::NormalizePlane(const XMFLOAT4& plane) const
         plane.w * invLength);
 }
 
+// пересекается ли frustum с BoundingBox
 bool D3D12Context::IntersectsFrustum(const BoundingBox& bounds, const Frustum& frustum) const
 {
     for (const XMFLOAT4& plane : frustum.Planes)
@@ -779,6 +900,7 @@ bool D3D12Context::IntersectsFrustum(const BoundingBox& bounds, const Frustum& f
 
     return true;
 }
+
 
 bool D3D12Context::ContainsBounds(const BoundingBox& outer, const BoundingBox& inner) const
 {
@@ -830,7 +952,75 @@ BoundingBox D3D12Context::TransformBoundingBox(const BoundingBox& localBounds, c
     return transformed;
 }
 
-void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex)
+MeshData D3D12Context::CaptureCurrentMesh() const
+{
+    MeshData mesh{};
+    mesh.VertexBuffer = m_vertexBuffer;
+    mesh.IndexBuffer = m_indexBuffer;
+    mesh.VbView = m_vbView;
+    mesh.IbView = m_ibView;
+    mesh.IndexCount = m_indexCount;
+    mesh.Use32BitIndices = m_use32BitIndices;
+    mesh.Submeshes = m_submeshes;
+    mesh.BoundsLocal = m_modelBoundsLocal;
+    mesh.DiffuseSrvIndex = UINT_MAX;
+    mesh.NormalSrvIndex = UINT_MAX;
+    return mesh;
+}
+
+void D3D12Context::ApplyMesh(const MeshData& mesh)
+{
+    m_vertexBuffer = mesh.VertexBuffer;
+    m_indexBuffer = mesh.IndexBuffer;
+    m_vbView = mesh.VbView;
+    m_ibView = mesh.IbView;
+    m_indexCount = mesh.IndexCount;
+    m_use32BitIndices = mesh.Use32BitIndices;
+    m_submeshes = mesh.Submeshes;
+    m_modelBoundsLocal = mesh.BoundsLocal;
+}
+
+UINT D3D12Context::SelectCrowdLodIndex(const SceneObject& object) const
+{
+    if (m_lodMeshes.empty())
+    {
+        return 0;
+    }
+
+    const XMFLOAT3 objectCenter(
+        0.5f * (object.BoundsWorld.Min.x + object.BoundsWorld.Max.x),
+        0.5f * (object.BoundsWorld.Min.y + object.BoundsWorld.Max.y),
+        0.5f * (object.BoundsWorld.Min.z + object.BoundsWorld.Max.z));
+
+    const float sizeX = object.BoundsWorld.Max.x - object.BoundsWorld.Min.x;
+    const float sizeY = object.BoundsWorld.Max.y - object.BoundsWorld.Min.y;
+    const float sizeZ = object.BoundsWorld.Max.z - object.BoundsWorld.Min.z;
+    const float maxDimension = (std::max)(sizeX, (std::max)(sizeY, sizeZ));
+
+    const float dx = objectCenter.x - m_cameraPos.x;
+    const float dy = objectCenter.y - m_cameraPos.y;
+    const float dz = objectCenter.z - m_cameraPos.z;
+    const float distanceSq = dx * dx + dy * dy + dz * dz;
+
+    const float lod0Distance = (std::max)(360.0f, maxDimension * 1.85f);
+    const float lod1Distance = (std::max)(760.0f, maxDimension * 3.15f);
+    const float lod0DistanceSq = lod0Distance * lod0Distance;
+    const float lod1DistanceSq = lod1Distance * lod1Distance;
+
+    if (distanceSq <= lod0DistanceSq)
+    {
+        return 0;
+    }
+
+    if (distanceSq <= lod1DistanceSq)
+    {
+        return (std::min)(1u, static_cast<UINT>(m_lodMeshes.size() - 1));
+    }
+
+    return static_cast<UINT>(m_lodMeshes.size() - 1);
+}
+
+void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex)
 {
     if (m_cbMappedData == nullptr)
     {
@@ -865,7 +1055,24 @@ void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex)
         uOff, vOff
     );
 
-    m_cbData.TimeParams = XMFLOAT4(m_time, 1.0f, 0.0f, 0.0f);
+    float lodFilterStrength = 0.0f;
+    if (m_currentScene == Scene::ChickenField)
+    {
+        switch (lodIndex)
+        {
+        case 0:
+            lodFilterStrength = 0.0f;
+            break;
+        case 1:
+            lodFilterStrength = 0.55f;
+            break;
+        default:
+            lodFilterStrength = 1.0f;
+            break;
+        }
+    }
+
+    m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, 0.0f, 0.0f);
     if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
     {
         // More visible displacement with a lower tessellation budget.
@@ -1608,12 +1815,9 @@ bool D3D12Context::CreateRootSignature()
 
     // правила чтения текстуры
     D3D12_STATIC_SAMPLER_DESC staticSampler{};
-    staticSampler.Filter = D3D12_FILTER_ANISOTROPIC;
-    staticSampler.MaxAnisotropy = 8;
-    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR; // сглаживание
-    staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;  // повторение текстуры
-    staticSampler.Filter = D3D12_FILTER_ANISOTROPIC;
-    staticSampler.MaxAnisotropy = 8;
+    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSampler.MaxAnisotropy = 1;
+    staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
@@ -2203,7 +2407,7 @@ void D3D12Context::EndFrame()
 void D3D12Context::UpdateSceneConstants()
 {
     static const XMFLOAT4X4 identity = MakeIdentityMatrix();
-    UpdateCB(identity, 0);
+    UpdateCB(identity, 0, 0);
 }
 
 void D3D12Context::DrawSceneGeometry(
@@ -2230,19 +2434,21 @@ void D3D12Context::DrawSceneGeometry(
         commandList->SetGraphicsRootDescriptorTable(displacementRootParameterIndex, displacementHandle);
     }
 
-    D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
-    normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
-    commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
-
     D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
     roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
     commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
 
-    const auto drawSubmeshes = [&](UINT textureSrvIndex)
+    const auto bindMesh = [&](const MeshData& mesh)
     {
-        if (!m_submeshes.empty())
+        commandList->IASetVertexBuffers(0, 1, &mesh.VbView);
+        commandList->IASetIndexBuffer(&mesh.IbView);
+    };
+
+    const auto drawSubmeshes = [&](const MeshData& mesh, UINT textureSrvIndex)
+    {
+        if (!mesh.Submeshes.empty())
         {
-            for (const auto& sm : m_submeshes)
+            for (const auto& sm : mesh.Submeshes)
             {
                 const UINT resolvedSrvIndex = (textureSrvIndex == UINT_MAX) ? sm.SrvIndex : textureSrvIndex;
                 D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
@@ -2256,16 +2462,20 @@ void D3D12Context::DrawSceneGeometry(
             D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = baseGpu;
             textureHandle.ptr += SIZE_T((textureSrvIndex == UINT_MAX) ? 0u : textureSrvIndex) * SIZE_T(m_srvDescriptorSize);
             commandList->SetGraphicsRootDescriptorTable(textureRootParameterIndex, textureHandle);
-            commandList->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
+            commandList->DrawIndexedInstanced(mesh.IndexCount, 1, 0, 0, 0);
         }
     };
 
     if (m_sceneObjects.empty())
     {
         static const XMFLOAT4X4 identity = MakeIdentityMatrix();
-        UpdateCB(identity, 0);
+        UpdateCB(identity, 0, 0);
         commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(0));
-        drawSubmeshes(UINT_MAX);
+        D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
+        normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
+        commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+        const MeshData mesh = CaptureCurrentMesh();
+        drawSubmeshes(mesh, UINT_MAX);
         return;
     }
 
@@ -2277,9 +2487,30 @@ void D3D12Context::DrawSceneGeometry(
             continue;
         }
 
-        UpdateCB(object.World, objectIndex);
-        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
-        drawSubmeshes(object.DiffuseSrvIndex);
+        if (m_currentScene == Scene::ChickenField && !m_lodMeshes.empty())
+        {
+            const UINT lodIndex = SelectCrowdLodIndex(object);
+            const MeshData& mesh = m_lodMeshes[lodIndex];
+            UpdateCB(object.World, objectIndex, lodIndex);
+            commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
+            const UINT normalSrvIndex = (mesh.NormalSrvIndex == UINT_MAX) ? m_normalMapSrvIndex : mesh.NormalSrvIndex;
+            D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
+            normalMapHandle.ptr += SIZE_T(normalSrvIndex) * SIZE_T(m_srvDescriptorSize);
+            commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+            bindMesh(mesh);
+            drawSubmeshes(mesh, object.DiffuseSrvIndex);
+        }
+        else
+        {
+            const MeshData mesh = CaptureCurrentMesh();
+            UpdateCB(object.World, objectIndex, 0);
+            commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
+            D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
+            normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
+            commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+            bindMesh(mesh);
+            drawSubmeshes(mesh, object.DiffuseSrvIndex);
+        }
     }
 }
 
@@ -2436,6 +2667,7 @@ void D3D12Context::Shutdown()
     m_octreeNodes.clear();
     m_octreeRoot = -1;
     m_submeshes.clear();
+    m_lodMeshes.clear();
     m_materialDiffusePaths.clear();
     m_materialToSrv.clear();
 

@@ -102,6 +102,13 @@ int Application::Run()
         m_timer.Tick();
         float deltaTime = m_timer.DeltaTime();
 
+        float forwardInput = 0.0f;
+        float strafeInput = 0.0f;
+        if (m_input.IsKeyDown('W')) forwardInput += 1.0f;
+        if (m_input.IsKeyDown('S')) forwardInput -= 1.0f;
+        if (m_input.IsKeyDown('D')) strafeInput += 1.0f;
+        if (m_input.IsKeyDown('A')) strafeInput -= 1.0f;
+
         bool orbitRotate = m_input.IsMouseButtonDown(VK_RBUTTON);
         bool dolly = m_input.IsMouseButtonDown(VK_LBUTTON);
 
@@ -115,6 +122,7 @@ int Application::Run()
         // скорость для 
         const float rotateSpeed = 0.0035f;
         const float dollySpeed = 1.5f;
+        const float moveSpeed = 260.0f;
 
 
         m_renderingSystem.UpdateCameraOrbit(
@@ -125,6 +133,7 @@ int Application::Run()
             dolly,
             (float)mouseDeltaX,
             (float)mouseDeltaY);
+        m_renderingSystem.UpdateCameraMove(deltaTime, forwardInput, strafeInput, moveSpeed);
 
         m_renderingSystem.SetTime(m_timer.TotalTime());
         m_renderingSystem.RenderFrame();

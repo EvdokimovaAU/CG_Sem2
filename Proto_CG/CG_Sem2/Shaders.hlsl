@@ -107,13 +107,17 @@ float3x3 ComputeTBN(float3 normalW, float3 worldPos, float2 uv)
 
 float4 SampleAntiAliased(Texture2D tex, float2 uv)
 {
+    float filterStrength = saturate(TimeParams.y);
+    if (filterStrength <= 0.001f)
+    {
+        return tex.SampleLevel(gSampler, uv, 0.0f);
+    }
+
     float2 du = ddx(uv);
     float2 dv = ddy(uv);
-    float footprint = max(length(du), length(dv));
-    float filterAmount = saturate(footprint * 512.0f);
-    float2 offset = (abs(du) + abs(dv)) * 0.35f;
+    float2 offset = (abs(du) + abs(dv)) * lerp(0.0f, 1.35f, filterStrength);
 
-    float4 baseSample = tex.Sample(gSampler, uv);
+    float4 baseSample = tex.SampleLevel(gSampler, uv, 0.0f);
     float4 blurred =
         tex.Sample(gSampler, uv + float2( offset.x,  offset.y)) +
         tex.Sample(gSampler, uv + float2(-offset.x,  offset.y)) +
@@ -121,7 +125,7 @@ float4 SampleAntiAliased(Texture2D tex, float2 uv)
         tex.Sample(gSampler, uv + float2(-offset.x, -offset.y));
     blurred *= 0.25f;
 
-    return lerp(baseSample, blurred, filterAmount);
+    return lerp(baseSample, blurred, saturate(filterStrength * 1.15f));
 }
 
 [domain("tri")]
