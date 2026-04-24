@@ -412,7 +412,7 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
     {
         m_cameraDistance += mouseDeltaY * dollySpeed;
         if (m_cameraDistance < 2.0f)    m_cameraDistance = 2.0f;
-        if (m_cameraDistance > 5000.0f) m_cameraDistance = 5000.0f;
+        if (m_cameraDistance > 50000.0f) m_cameraDistance = 50000.0f;
     }
 
     XMVECTOR target = XMLoadFloat3(&m_cameraTarget);
@@ -437,7 +437,11 @@ void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float s
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 
     XMVECTOR forward = XMVectorSubtract(target, eye);
-    forward = XMVectorSetY(forward, 0.0f);
+
+    if (m_currentScene != Scene::Sponza)
+    {
+        forward = XMVectorSetY(forward, 0.0f);
+    }
 
     if (XMVectorGetX(XMVector3LengthSq(forward)) <= 1.0e-6f)
     {

@@ -1,8 +1,13 @@
 ﻿#include "RenderingSystem.h"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <string>
+#include <vector>
+
+#include "stb_image.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -11,6 +16,18 @@ using namespace DirectX;
 
 namespace
 {
+    constexpr UINT kParticleSrvBuffer0 = 0;
+    constexpr UINT kParticleSrvBuffer1 = 1;
+    constexpr UINT kParticleUavBuffer0 = 2;
+    constexpr UINT kParticleUavBuffer1 = 3;
+    constexpr UINT kParticleTextureSrv = 4;
+    constexpr UINT kParticleThreadGroupSize = 64;
+    constexpr UINT kFireSrvBuffer0 = 0;
+    constexpr UINT kFireSrvBuffer1 = 1;
+    constexpr UINT kFireUavBuffer0 = 2;
+    constexpr UINT kFireUavBuffer1 = 3;
+    constexpr UINT kFireThreadGroupSize = 64;
+
     struct DebugOverlayConstants
     {
         XMFLOAT4 OverlayRect;
@@ -19,6 +36,17 @@ namespace
         UINT DebugMode = 0;
         UINT Padding[3] = {};
     };
+
+    float Hash01(UINT value)
+    {
+        value ^= 2747636419u;
+        value *= 2654435769u;
+        value ^= value >> 16;
+        value *= 2654435769u;
+        value ^= value >> 16;
+        value *= 2654435769u;
+        return static_cast<float>(value & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+    }
 
     bool ResolveShaderPath(const wchar_t* fileName, wchar_t* outPath, size_t outPathCount)
     {
@@ -44,6 +72,23 @@ namespace
 
         return GetFileAttributesW(outPath) != INVALID_FILE_ATTRIBUTES;
     }
+
+    bool ResolveAssetPath(const wchar_t* relativePath, wchar_t* outPath, size_t outPathCount)
+    {
+        wchar_t exeDir[MAX_PATH];
+        GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+
+        wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
+        if (lastSlash == nullptr)
+        {
+            return false;
+        }
+        *(lastSlash + 1) = 0;
+
+        wcscpy_s(outPath, outPathCount, exeDir);
+        wcscat_s(outPath, outPathCount, relativePath);
+        return GetFileAttributesW(outPath) != INVALID_FILE_ATTRIBUTES;
+    }
 }
 
 bool RenderingSystem::Initialize(HWND hwnd, UINT width, UINT height)
@@ -66,6 +111,12 @@ bool RenderingSystem::Initialize(HWND hwnd, UINT width, UINT height)
 
 bool RenderingSystem::LoadScene(Scene scene)
 {
+    m_particleDataInitialized = false;
+    m_particleSourceIndex = 0;
+    m_previousParticleTime = 0.0f;
+    m_fireDataInitialized = false;
+    m_fireSourceIndex = 0;
+    m_previousFireTime = 0.0f;
     return m_context.LoadScene(scene);
 }
 // корректное завершение рендера и очистка памяти
@@ -81,15 +132,47 @@ void RenderingSystem::Shutdown()
         m_waterConstantBuffer->Unmap(0, nullptr);
         m_waterCBMappedData = nullptr;
     }
+    if (m_particleSimulationCBMappedData != nullptr && m_particleSimulationConstantBuffer != nullptr)
+    {
+        m_particleSimulationConstantBuffer->Unmap(0, nullptr);
+        m_particleSimulationCBMappedData = nullptr;
+    }
+    if (m_particleRenderCBMappedData != nullptr && m_particleRenderConstantBuffer != nullptr)
+    {
+        m_particleRenderConstantBuffer->Unmap(0, nullptr);
+        m_particleRenderCBMappedData = nullptr;
+    }
+    if (m_fireSimulationCBMappedData != nullptr && m_fireSimulationConstantBuffer != nullptr)
+    {
+        m_fireSimulationConstantBuffer->Unmap(0, nullptr);
+        m_fireSimulationCBMappedData = nullptr;
+    }
+    if (m_fireRenderCBMappedData != nullptr && m_fireRenderConstantBuffer != nullptr)
+    {
+        m_fireRenderConstantBuffer->Unmap(0, nullptr);
+        m_fireRenderCBMappedData = nullptr;
+    }
 
     m_deferredLightConstantBuffer.Reset();
+    m_particleSimulationConstantBuffer.Reset();
+    m_particleRenderConstantBuffer.Reset();
+    m_fireSimulationConstantBuffer.Reset();
+    m_fireRenderConstantBuffer.Reset();
     m_waterConstantBuffer.Reset();
     m_deferredGeometryPSO.Reset();
     m_deferredLightingPSO.Reset();
     m_debugOverlayPSO.Reset();
+    m_particleGraphicsPSO.Reset();
+    m_particleComputePSO.Reset();
+    m_fireGraphicsPSO.Reset();
+    m_fireComputePSO.Reset();
     m_waterPSO.Reset();
     m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
+    m_particleGraphicsRootSignature.Reset();
+    m_particleComputeRootSignature.Reset();
+    m_fireGraphicsRootSignature.Reset();
+    m_fireComputeRootSignature.Reset();
     m_waterRootSignature.Reset();
     m_deferredGeometryVS.Reset();
     m_deferredGeometryHS.Reset();
@@ -99,10 +182,34 @@ void RenderingSystem::Shutdown()
     m_deferredLightingPS.Reset();
     m_debugOverlayVS.Reset();
     m_debugOverlayPS.Reset();
+    m_particleVS.Reset();
+    m_particleGS.Reset();
+    m_particlePS.Reset();
+    m_particleCS.Reset();
+    m_fireVS.Reset();
+    m_fireGS.Reset();
+    m_firePS.Reset();
+    m_fireCS.Reset();
     m_waterVS.Reset();
     m_waterHS.Reset();
     m_waterDS.Reset();
     m_waterPS.Reset();
+    m_particleBuffers[0].Reset();
+    m_particleBuffers[1].Reset();
+    m_particleCounterBuffers[0].Reset();
+    m_particleCounterBuffers[1].Reset();
+    m_particleUploadBuffer.Reset();
+    m_particleCounterUploadBuffer.Reset();
+    m_particleTexture.Reset();
+    m_particleTextureUpload.Reset();
+    m_particleHeap.Reset();
+    m_fireBuffers[0].Reset();
+    m_fireBuffers[1].Reset();
+    m_fireCounterBuffers[0].Reset();
+    m_fireCounterBuffers[1].Reset();
+    m_fireUploadBuffer.Reset();
+    m_fireCounterUploadBuffer.Reset();
+    m_fireHeap.Reset();
     m_gbuffer.Shutdown();
     m_context.Shutdown();
 }
@@ -222,8 +329,12 @@ void RenderingSystem::RenderDeferredFrame()
     }
 
     m_context.BeginFrame();
+    UpdateParticleSimulation();
+    UpdateFireSimulation();
     RenderOpaqueStage();
     RenderLightingStage();
+    RenderFireStage();
+    RenderParticleStage();
     RenderGBufferDebugOverlay();
     RenderTransparentStage();
     m_context.EndFrame();
@@ -320,6 +431,17 @@ bool RenderingSystem::InitializeDeferredResources()
         CreateDeferredLightingPipeline() &&
         CreateDebugOverlayRootSignature() &&
         CreateDebugOverlayPipeline() &&
+        CreateParticleRootSignature() &&
+        CreateParticleSimulationPipeline() &&
+        CreateParticleRenderPipeline() &&
+        CreateParticleResources() &&
+        CreateParticleTexture() &&
+        CreateParticleConstantBuffers() &&
+        CreateFireRootSignature() &&
+        CreateFireSimulationPipeline() &&
+        CreateFireRenderPipeline() &&
+        CreateFireResources() &&
+        CreateFireConstantBuffers() &&
         CreateWaterRootSignature() &&
         CreateWaterPipeline() &&
         CreateLightingConstantBuffer() &&
@@ -336,10 +458,14 @@ bool RenderingSystem::CompileDeferredShaders()
     wchar_t geometryPath[MAX_PATH];
     wchar_t lightingPath[MAX_PATH];
     wchar_t debugPath[MAX_PATH];
+    wchar_t particlePath[MAX_PATH];
+    wchar_t firePath[MAX_PATH];
     wchar_t waterPath[MAX_PATH];
     if (!ResolveShaderPath(L"DeferredGeometry.hlsl", geometryPath, MAX_PATH) ||
         !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH) ||
         !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH) ||
+        !ResolveShaderPath(L"ParticleDust.hlsl", particlePath, MAX_PATH) ||
+        !ResolveShaderPath(L"FireParticles.hlsl", firePath, MAX_PATH) ||
         !ResolveShaderPath(L"Water.hlsl", waterPath, MAX_PATH))
     {
         return false;
@@ -459,6 +585,126 @@ bool RenderingSystem::CompileDeferredShaders()
         flags,
         0,
         &m_debugOverlayPS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        particlePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_particleVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        particlePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "GSMain",
+        "gs_5_0",
+        flags,
+        0,
+        &m_particleGS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        particlePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        flags,
+        0,
+        &m_particlePS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        particlePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "CSMain",
+        "cs_5_0",
+        flags,
+        0,
+        &m_particleCS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        firePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_fireVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        firePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "GSMain",
+        "gs_5_0",
+        flags,
+        0,
+        &m_fireGS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        firePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        flags,
+        0,
+        &m_firePS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        firePath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "CSMain",
+        "cs_5_0",
+        flags,
+        0,
+        &m_fireCS,
         nullptr);
     if (FAILED(hr))
     {
@@ -609,6 +855,210 @@ bool RenderingSystem::CreateDebugOverlayRootSignature()
         IID_PPV_ARGS(&m_debugOverlayRootSignature)));
 }
 
+bool RenderingSystem::CreateParticleRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE particleBufferRange{};
+    particleBufferRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    particleBufferRange.NumDescriptors = 1;
+    particleBufferRange.BaseShaderRegister = 0;
+    particleBufferRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE particleTextureRange{};
+    particleTextureRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    particleTextureRange.NumDescriptors = 1;
+    particleTextureRange.BaseShaderRegister = 1;
+    particleTextureRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER graphicsRootParams[3]{};
+    graphicsRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    graphicsRootParams[0].Descriptor.ShaderRegister = 1;
+    graphicsRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    graphicsRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    graphicsRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    graphicsRootParams[1].DescriptorTable.pDescriptorRanges = &particleBufferRange;
+    graphicsRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    graphicsRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    graphicsRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    graphicsRootParams[2].DescriptorTable.pDescriptorRanges = &particleTextureRange;
+    graphicsRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC graphicsDesc{};
+    graphicsDesc.NumParameters = _countof(graphicsRootParams);
+    graphicsDesc.pParameters = graphicsRootParams;
+    graphicsDesc.NumStaticSamplers = 1;
+    graphicsDesc.pStaticSamplers = &sampler;
+    graphicsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &graphicsDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    if (FAILED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_particleGraphicsRootSignature))))
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_RANGE consumeRange{};
+    consumeRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    consumeRange.NumDescriptors = 1;
+    consumeRange.BaseShaderRegister = 0;
+    consumeRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE appendRange{};
+    appendRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    appendRange.NumDescriptors = 1;
+    appendRange.BaseShaderRegister = 1;
+    appendRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER computeRootParams[3]{};
+    computeRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    computeRootParams[0].Descriptor.ShaderRegister = 0;
+    computeRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    computeRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    computeRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    computeRootParams[1].DescriptorTable.pDescriptorRanges = &consumeRange;
+    computeRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    computeRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    computeRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    computeRootParams[2].DescriptorTable.pDescriptorRanges = &appendRange;
+    computeRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC computeDesc{};
+    computeDesc.NumParameters = _countof(computeRootParams);
+    computeDesc.pParameters = computeRootParams;
+
+    serialized.Reset();
+    error.Reset();
+    hr = D3D12SerializeRootSignature(
+        &computeDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_particleComputeRootSignature)));
+}
+
+bool RenderingSystem::CreateFireRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE srvRange{};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 1;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER graphicsRootParams[2]{};
+    graphicsRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    graphicsRootParams[0].Descriptor.ShaderRegister = 1;
+    graphicsRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    graphicsRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    graphicsRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    graphicsRootParams[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    graphicsRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC graphicsDesc{};
+    graphicsDesc.NumParameters = _countof(graphicsRootParams);
+    graphicsDesc.pParameters = graphicsRootParams;
+    graphicsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &graphicsDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    if (FAILED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_fireGraphicsRootSignature))))
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_RANGE consumeRange{};
+    consumeRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    consumeRange.NumDescriptors = 1;
+    consumeRange.BaseShaderRegister = 0;
+    consumeRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE appendRange{};
+    appendRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    appendRange.NumDescriptors = 1;
+    appendRange.BaseShaderRegister = 1;
+    appendRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER computeRootParams[3]{};
+    computeRootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    computeRootParams[0].Descriptor.ShaderRegister = 0;
+    computeRootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    computeRootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    computeRootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    computeRootParams[1].DescriptorTable.pDescriptorRanges = &consumeRange;
+    computeRootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    computeRootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    computeRootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    computeRootParams[2].DescriptorTable.pDescriptorRanges = &appendRange;
+    computeRootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC computeDesc{};
+    computeDesc.NumParameters = _countof(computeRootParams);
+    computeDesc.pParameters = computeRootParams;
+
+    serialized.Reset();
+    error.Reset();
+    hr = D3D12SerializeRootSignature(
+        &computeDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_fireComputeRootSignature)));
+}
+
 bool RenderingSystem::CreateWaterRootSignature()
 {
     D3D12_ROOT_PARAMETER rootParam{};
@@ -745,6 +1195,583 @@ bool RenderingSystem::CreateDebugOverlayPipeline()
     return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_debugOverlayPSO)));
 }
 
+bool RenderingSystem::CreateParticleSimulationPipeline()
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = m_particleComputeRootSignature.Get();
+    desc.CS = { m_particleCS->GetBufferPointer(), m_particleCS->GetBufferSize() };
+
+    return SUCCEEDED(m_context.GetDevice()->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_particleComputePSO)));
+}
+
+bool RenderingSystem::CreateParticleRenderPipeline()
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_particleGraphicsRootSignature.Get();
+    pso.VS = { m_particleVS->GetBufferPointer(), m_particleVS->GetBufferSize() };
+    pso.GS = { m_particleGS->GetBufferPointer(), m_particleGS->GetBufferSize() };
+    pso.PS = { m_particlePS->GetBufferPointer(), m_particlePS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].BlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_particleGraphicsPSO)));
+}
+
+bool RenderingSystem::CreateParticleResources()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+    heapDesc.NumDescriptors = 5;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_particleHeap))))
+    {
+        return false;
+    }
+    m_particleDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    const UINT particleBufferSize = sizeof(DustParticleCPU) * MaxDustParticles;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC particleDesc{};
+    particleDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    particleDesc.Width = particleBufferSize;
+    particleDesc.Height = 1;
+    particleDesc.DepthOrArraySize = 1;
+    particleDesc.MipLevels = 1;
+    particleDesc.SampleDesc.Count = 1;
+    particleDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    particleDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        if (FAILED(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &particleDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_particleBuffers[i]))))
+        {
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_DESC counterDesc = particleDesc;
+    counterDesc.Width = sizeof(UINT);
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        if (FAILED(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &counterDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_particleCounterBuffers[i]))))
+        {
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = particleBufferSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_particleUploadBuffer))))
+    {
+        return false;
+    }
+
+    uploadDesc.Width = sizeof(UINT) * 2;
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_particleCounterUploadBuffer))))
+    {
+        return false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = m_particleHeap->GetCPUDescriptorHandleForHeapStart();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Buffer.NumElements = MaxDustParticles;
+    srvDesc.Buffer.StructureByteStride = sizeof(DustParticleCPU);
+
+    device->CreateShaderResourceView(m_particleBuffers[0].Get(), &srvDesc, cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_particleDescriptorSize);
+    device->CreateShaderResourceView(m_particleBuffers[1].Get(), &srvDesc, cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_particleDescriptorSize);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+    uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uavDesc.Buffer.NumElements = MaxDustParticles;
+    uavDesc.Buffer.StructureByteStride = sizeof(DustParticleCPU);
+    uavDesc.Buffer.CounterOffsetInBytes = 0;
+
+    device->CreateUnorderedAccessView(
+        m_particleBuffers[0].Get(),
+        m_particleCounterBuffers[0].Get(),
+        &uavDesc,
+        cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_particleDescriptorSize);
+    device->CreateUnorderedAccessView(
+        m_particleBuffers[1].Get(),
+        m_particleCounterBuffers[1].Get(),
+        &uavDesc,
+        cpuHandle);
+
+    return true;
+}
+
+bool RenderingSystem::CreateParticleTexture()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr || m_particleHeap == nullptr)
+    {
+        return false;
+    }
+
+    wchar_t texturePathW[MAX_PATH];
+    if (!ResolveAssetPath(L"models\\textures\\simply.png", texturePathW, MAX_PATH))
+    {
+        return false;
+    }
+
+    char texturePathA[MAX_PATH];
+    WideCharToMultiByte(CP_ACP, 0, texturePathW, -1, texturePathA, MAX_PATH, nullptr, nullptr);
+
+    int width = 0;
+    int height = 0;
+    int comp = 0;
+    stbi_uc* pixels = stbi_load(texturePathA, &width, &height, &comp, 4);
+    if (pixels == nullptr || width <= 0 || height <= 0)
+    {
+        return false;
+    }
+
+    const UINT srcRowPitch = static_cast<UINT>(width) * 4u;
+    const UINT alignedRowPitch =
+        (srcRowPitch + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+        ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+    const UINT64 uploadSize = UINT64(alignedRowPitch) * UINT64(height);
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC textureDesc{};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = static_cast<UINT>(width);
+    textureDesc.Height = static_cast<UINT>(height);
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = 1;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_particleTexture))))
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_particleTextureUpload))))
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    void* mappedData = nullptr;
+    if (FAILED(m_particleTextureUpload->Map(0, nullptr, &mappedData)) || mappedData == nullptr)
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+    for (int y = 0; y < height; ++y)
+    {
+        std::memcpy(
+            static_cast<unsigned char*>(mappedData) + static_cast<size_t>(alignedRowPitch) * static_cast<size_t>(y),
+            pixels + static_cast<size_t>(srcRowPitch) * static_cast<size_t>(y),
+            srcRowPitch);
+    }
+    m_particleTextureUpload->Unmap(0, nullptr);
+    stbi_image_free(pixels);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = m_particleHeap->GetCPUDescriptorHandleForHeapStart();
+    cpuHandle.ptr += SIZE_T(kParticleTextureSrv) * SIZE_T(m_particleDescriptorSize);
+    device->CreateShaderResourceView(m_particleTexture.Get(), &srvDesc, cpuHandle);
+
+    m_particleTextureUploaded = false;
+    return true;
+}
+
+bool RenderingSystem::CreateParticleConstantBuffers()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    const UINT simCbSize = (sizeof(ParticleSimCB) + 255) & ~255u;
+    const UINT renderCbSize = (sizeof(ParticleRenderCB) + 255) & ~255u;
+
+    D3D12_HEAP_PROPERTIES upload{};
+    upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = simCbSize;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &upload,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_particleSimulationConstantBuffer))))
+    {
+        return false;
+    }
+
+    desc.Width = renderCbSize;
+    if (FAILED(device->CreateCommittedResource(
+        &upload,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_particleRenderConstantBuffer))))
+    {
+        return false;
+    }
+
+    D3D12_RANGE readRange{ 0, 0 };
+    if (FAILED(m_particleSimulationConstantBuffer->Map(
+        0,
+        &readRange,
+        reinterpret_cast<void**>(&m_particleSimulationCBMappedData))))
+    {
+        return false;
+    }
+
+    if (FAILED(m_particleRenderConstantBuffer->Map(
+        0,
+        &readRange,
+        reinterpret_cast<void**>(&m_particleRenderCBMappedData))))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool RenderingSystem::CreateFireSimulationPipeline()
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = m_fireComputeRootSignature.Get();
+    desc.CS = { m_fireCS->GetBufferPointer(), m_fireCS->GetBufferSize() };
+
+    return SUCCEEDED(m_context.GetDevice()->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_fireComputePSO)));
+}
+
+bool RenderingSystem::CreateFireRenderPipeline()
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_fireGraphicsRootSignature.Get();
+    pso.VS = { m_fireVS->GetBufferPointer(), m_fireVS->GetBufferSize() };
+    pso.GS = { m_fireGS->GetBufferPointer(), m_fireGS->GetBufferSize() };
+    pso.PS = { m_firePS->GetBufferPointer(), m_firePS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].BlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_fireGraphicsPSO)));
+}
+
+bool RenderingSystem::CreateFireResources()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+    heapDesc.NumDescriptors = 4;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_fireHeap))))
+    {
+        return false;
+    }
+    m_fireDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    const UINT fireBufferSize = sizeof(FireParticleCPU) * MaxFireParticles;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC particleDesc{};
+    particleDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    particleDesc.Width = fireBufferSize;
+    particleDesc.Height = 1;
+    particleDesc.DepthOrArraySize = 1;
+    particleDesc.MipLevels = 1;
+    particleDesc.SampleDesc.Count = 1;
+    particleDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    particleDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        if (FAILED(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &particleDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_fireBuffers[i]))))
+        {
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_DESC counterDesc = particleDesc;
+    counterDesc.Width = sizeof(UINT);
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        if (FAILED(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &counterDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_fireCounterBuffers[i]))))
+        {
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = fireBufferSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_fireUploadBuffer))))
+    {
+        return false;
+    }
+
+    uploadDesc.Width = sizeof(UINT) * 2;
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_fireCounterUploadBuffer))))
+    {
+        return false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = m_fireHeap->GetCPUDescriptorHandleForHeapStart();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Buffer.NumElements = MaxFireParticles;
+    srvDesc.Buffer.StructureByteStride = sizeof(FireParticleCPU);
+
+    device->CreateShaderResourceView(m_fireBuffers[0].Get(), &srvDesc, cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_fireDescriptorSize);
+    device->CreateShaderResourceView(m_fireBuffers[1].Get(), &srvDesc, cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_fireDescriptorSize);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+    uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uavDesc.Buffer.NumElements = MaxFireParticles;
+    uavDesc.Buffer.StructureByteStride = sizeof(FireParticleCPU);
+
+    device->CreateUnorderedAccessView(m_fireBuffers[0].Get(), m_fireCounterBuffers[0].Get(), &uavDesc, cpuHandle);
+    cpuHandle.ptr += SIZE_T(m_fireDescriptorSize);
+    device->CreateUnorderedAccessView(m_fireBuffers[1].Get(), m_fireCounterBuffers[1].Get(), &uavDesc, cpuHandle);
+
+    return true;
+}
+
+bool RenderingSystem::CreateFireConstantBuffers()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    const UINT simCbSize = (sizeof(ParticleSimCB) + 255) & ~255u;
+    const UINT renderCbSize = (sizeof(ParticleRenderCB) + 255) & ~255u;
+
+    D3D12_HEAP_PROPERTIES upload{};
+    upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = simCbSize;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &upload,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_fireSimulationConstantBuffer))))
+    {
+        return false;
+    }
+
+    desc.Width = renderCbSize;
+    if (FAILED(device->CreateCommittedResource(
+        &upload,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_fireRenderConstantBuffer))))
+    {
+        return false;
+    }
+
+    D3D12_RANGE readRange{ 0, 0 };
+    if (FAILED(m_fireSimulationConstantBuffer->Map(
+        0,
+        &readRange,
+        reinterpret_cast<void**>(&m_fireSimulationCBMappedData))))
+    {
+        return false;
+    }
+
+    if (FAILED(m_fireRenderConstantBuffer->Map(
+        0,
+        &readRange,
+        reinterpret_cast<void**>(&m_fireRenderCBMappedData))))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool RenderingSystem::CreateWaterPipeline()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
@@ -843,6 +1870,724 @@ void RenderingSystem::RenderGBufferDebugOverlay()
             0);
         commandList->DrawInstanced(3, 1, 0, 0);
     }
+}
+
+void RenderingSystem::InitializeParticleData()
+{
+    if (m_particleUploadBuffer == nullptr || m_particleCounterUploadBuffer == nullptr)
+    {
+        return;
+    }
+
+    std::vector<DustParticleCPU> particles(MaxDustParticles);
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+
+    const float halfWidth = (std::max)(sceneExtents.x * 0.42f, 180.0f);
+    const float halfDepth = (std::max)(sceneExtents.z * 0.30f, 140.0f);
+    const float minY = sceneCenter.y - sceneExtents.y * 0.18f;
+    const float maxY = sceneCenter.y + sceneExtents.y * 0.28f;
+
+    for (UINT i = 0; i < MaxDustParticles; ++i)
+    {
+        const float seed0 = Hash01(i * 17u + 11u);
+        const float seed1 = Hash01(i * 29u + 7u);
+        const float seed2 = Hash01(i * 43u + 19u);
+        const float seed3 = Hash01(i * 71u + 3u);
+
+        DustParticleCPU particle{};
+        particle.Position = XMFLOAT3(
+            sceneCenter.x + (seed0 * 2.0f - 1.0f) * halfWidth,
+            minY + seed1 * (maxY - minY),
+            sceneCenter.z + (seed2 * 2.0f - 1.0f) * halfDepth);
+        particle.Size = 1.2f + seed3 * 2.0f;
+        particle.Velocity = XMFLOAT3(
+            (seed1 * 2.0f - 1.0f) * 8.0f,
+            (seed3 * 2.0f - 1.0f) * 0.9f,
+            (seed0 * 2.0f - 1.0f) * 8.0f);
+        particle.Seed = 1.0f + static_cast<float>(i) * 0.6180339f;
+        particles[i] = particle;
+    }
+
+    void* particleData = nullptr;
+    if (SUCCEEDED(m_particleUploadBuffer->Map(0, nullptr, &particleData)) && particleData != nullptr)
+    {
+        std::memcpy(particleData, particles.data(), sizeof(DustParticleCPU) * MaxDustParticles);
+        m_particleUploadBuffer->Unmap(0, nullptr);
+    }
+
+    UINT* counterData = nullptr;
+    if (SUCCEEDED(m_particleCounterUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&counterData))) &&
+        counterData != nullptr)
+    {
+        counterData[0] = MaxDustParticles;
+        counterData[1] = 0;
+        m_particleCounterUploadBuffer->Unmap(0, nullptr);
+    }
+}
+
+void RenderingSystem::ResetParticleCounters(ID3D12GraphicsCommandList* commandList, bool resetSourceCounter)
+{
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    const UINT destinationIndex = 1u - m_particleSourceIndex;
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    UINT barrierCount = 0;
+
+    if (resetSourceCounter)
+    {
+        barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[barrierCount].Transition.pResource = m_particleCounterBuffers[m_particleSourceIndex].Get();
+        barriers[barrierCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[barrierCount].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barriers[barrierCount].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        ++barrierCount;
+    }
+
+    barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[barrierCount].Transition.pResource = m_particleCounterBuffers[destinationIndex].Get();
+    barriers[barrierCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[barrierCount].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[barrierCount].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    ++barrierCount;
+
+    commandList->ResourceBarrier(barrierCount, barriers);
+
+    if (resetSourceCounter)
+    {
+        commandList->CopyBufferRegion(
+            m_particleCounterBuffers[m_particleSourceIndex].Get(),
+            0,
+            m_particleCounterUploadBuffer.Get(),
+            0,
+            sizeof(UINT));
+    }
+
+    commandList->CopyBufferRegion(
+        m_particleCounterBuffers[destinationIndex].Get(),
+        0,
+        m_particleCounterUploadBuffer.Get(),
+        sizeof(UINT),
+        sizeof(UINT));
+
+    D3D12_RESOURCE_BARRIER toUav[2]{};
+    UINT toUavCount = 0;
+
+    if (resetSourceCounter)
+    {
+        toUav[toUavCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toUav[toUavCount].Transition.pResource = m_particleCounterBuffers[m_particleSourceIndex].Get();
+        toUav[toUavCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        toUav[toUavCount].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        toUav[toUavCount].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        ++toUavCount;
+    }
+
+    toUav[toUavCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toUav[toUavCount].Transition.pResource = m_particleCounterBuffers[destinationIndex].Get();
+    toUav[toUavCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    toUav[toUavCount].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    toUav[toUavCount].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    ++toUavCount;
+
+    commandList->ResourceBarrier(toUavCount, toUav);
+}
+
+void RenderingSystem::UpdateParticleSimulationConstants(float deltaTime)
+{
+    if (m_particleSimulationCBMappedData == nullptr)
+    {
+        return;
+    }
+
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+
+    ParticleSimCB cb{};
+    cb.DeltaTimeTime = XMFLOAT4(deltaTime, m_context.GetTime(), static_cast<float>(MaxDustParticles), 0.0f);
+    cb.BoundsMin = XMFLOAT4(
+        sceneCenter.x - (std::max)(sceneExtents.x * 0.42f, 180.0f),
+        sceneCenter.y - sceneExtents.y * 0.18f,
+        sceneCenter.z - (std::max)(sceneExtents.z * 0.30f, 140.0f),
+        0.0f);
+    cb.BoundsMax = XMFLOAT4(
+        sceneCenter.x + (std::max)(sceneExtents.x * 0.42f, 180.0f),
+        sceneCenter.y + sceneExtents.y * 0.28f,
+        sceneCenter.z + (std::max)(sceneExtents.z * 0.30f, 140.0f),
+        0.0f);
+    cb.NoiseParams = XMFLOAT4(1.55f, 1.20f, 0.40f, 0.0f);
+
+    std::memcpy(m_particleSimulationCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateParticleRenderConstants()
+{
+    if (m_particleRenderCBMappedData == nullptr)
+    {
+        return;
+    }
+
+    const XMFLOAT3 cameraPosValue = m_context.GetCameraPosition();
+    const XMFLOAT3 cameraTargetValue = m_context.GetCameraTarget();
+
+    XMVECTOR cameraPos = XMLoadFloat3(&cameraPosValue);
+    XMVECTOR cameraTarget = XMLoadFloat3(&cameraTargetValue);
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    XMMATRIX view = XMMatrixLookAtLH(cameraPos, cameraTarget, up);
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(
+        XM_PIDIV4,
+        static_cast<float>(m_width) / static_cast<float>(m_height),
+        1.0f,
+        20000.0f);
+    XMMATRIX viewProj = XMMatrixMultiply(view, proj);
+
+    XMFLOAT3 forwardValue = XMFLOAT3(
+        cameraTargetValue.x - cameraPosValue.x,
+        cameraTargetValue.y - cameraPosValue.y,
+        cameraTargetValue.z - cameraPosValue.z);
+    XMVECTOR forward = XMVector3Normalize(XMLoadFloat3(&forwardValue));
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, forward));
+    XMVECTOR billboardUp = XMVector3Normalize(XMVector3Cross(forward, right));
+
+    XMFLOAT3 rightValue{};
+    XMFLOAT3 upValue{};
+    XMStoreFloat3(&rightValue, right);
+    XMStoreFloat3(&upValue, billboardUp);
+
+    ParticleRenderCB cb{};
+    XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(viewProj));
+    cb.CameraRight = XMFLOAT4(rightValue.x, rightValue.y, rightValue.z, 0.0f);
+    cb.CameraUp = XMFLOAT4(upValue.x, upValue.y, upValue.z, 0.0f);
+    cb.DustColor = XMFLOAT4(0.70f, 0.66f, 0.58f, 1.0f);
+    cb.EffectParams = XMFLOAT4(0.0f, 1.0f, 0.0f, 0.0f);
+
+    std::memcpy(m_particleRenderCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateParticleSimulation()
+{
+    if (m_context.GetCurrentScene() != Scene::Sponza ||
+        !m_particleComputePSO ||
+        !m_particleComputeRootSignature ||
+        !m_particleHeap)
+    {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    if (!m_particleDataInitialized)
+    {
+        InitializeParticleData();
+
+        commandList->CopyResource(m_particleBuffers[m_particleSourceIndex].Get(), m_particleUploadBuffer.Get());
+        commandList->CopyResource(m_particleBuffers[1u - m_particleSourceIndex].Get(), m_particleUploadBuffer.Get());
+
+        D3D12_RESOURCE_BARRIER initBarriers[4]{};
+        for (UINT i = 0; i < 2; ++i)
+        {
+            initBarriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            initBarriers[i].Transition.pResource = m_particleBuffers[i].Get();
+            initBarriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            initBarriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            initBarriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+            initBarriers[2 + i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            initBarriers[2 + i].Transition.pResource = m_particleCounterBuffers[i].Get();
+            initBarriers[2 + i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            initBarriers[2 + i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            initBarriers[2 + i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        commandList->ResourceBarrier(_countof(initBarriers), initBarriers);
+        ResetParticleCounters(commandList, true);
+        m_particleDataInitialized = true;
+        m_previousParticleTime = m_context.GetTime();
+    }
+
+    if (!m_particleTextureUploaded && m_particleTexture != nullptr && m_particleTextureUpload != nullptr)
+    {
+        const D3D12_RESOURCE_DESC textureDesc = m_particleTexture->GetDesc();
+        const UINT rowPitch = (static_cast<UINT>(textureDesc.Width) * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+            ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = m_particleTexture.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_particleTextureUpload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = 0;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width = static_cast<UINT>(textureDesc.Width);
+        src.PlacedFootprint.Footprint.Height = textureDesc.Height;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = rowPitch;
+
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER textureBarrier{};
+        textureBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        textureBarrier.Transition.pResource = m_particleTexture.Get();
+        textureBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        textureBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        textureBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        commandList->ResourceBarrier(1, &textureBarrier);
+
+        m_particleTextureUploaded = true;
+    }
+
+    const float currentTime = m_context.GetTime();
+    float deltaTime = currentTime - m_previousParticleTime;
+    if (deltaTime < 0.0f)
+    {
+        deltaTime = 0.0f;
+    }
+    if (deltaTime > 0.033f)
+    {
+        deltaTime = 0.033f;
+    }
+    m_previousParticleTime = currentTime;
+
+    UpdateParticleSimulationConstants(deltaTime);
+    ResetParticleCounters(commandList, false);
+
+    ID3D12DescriptorHeap* heaps[] = { m_particleHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetPipelineState(m_particleComputePSO.Get());
+    commandList->SetComputeRootSignature(m_particleComputeRootSignature.Get());
+    commandList->SetComputeRootConstantBufferView(0, m_particleSimulationConstantBuffer->GetGPUVirtualAddress());
+
+    const UINT destinationIndex = 1u - m_particleSourceIndex;
+    D3D12_GPU_DESCRIPTOR_HANDLE consumeHandle = m_particleHeap->GetGPUDescriptorHandleForHeapStart();
+    consumeHandle.ptr += SIZE_T((m_particleSourceIndex == 0) ? kParticleUavBuffer0 : kParticleUavBuffer1) *
+        SIZE_T(m_particleDescriptorSize);
+    commandList->SetComputeRootDescriptorTable(1, consumeHandle);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE appendHandle = m_particleHeap->GetGPUDescriptorHandleForHeapStart();
+    appendHandle.ptr += SIZE_T((destinationIndex == 0) ? kParticleUavBuffer0 : kParticleUavBuffer1) *
+        SIZE_T(m_particleDescriptorSize);
+    commandList->SetComputeRootDescriptorTable(2, appendHandle);
+
+    const UINT groupCount = (MaxDustParticles + kParticleThreadGroupSize - 1) / kParticleThreadGroupSize;
+    commandList->Dispatch(groupCount, 1, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarrier[4]{};
+    for (UINT i = 0; i < 2; ++i)
+    {
+        uavBarrier[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier[i].UAV.pResource = m_particleBuffers[i].Get();
+        uavBarrier[2 + i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier[2 + i].UAV.pResource = m_particleCounterBuffers[i].Get();
+    }
+    commandList->ResourceBarrier(_countof(uavBarrier), uavBarrier);
+
+    D3D12_RESOURCE_BARRIER toSrv{};
+    toSrv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toSrv.Transition.pResource = m_particleBuffers[destinationIndex].Get();
+    toSrv.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &toSrv);
+
+    m_particleSourceIndex = destinationIndex;
+}
+
+void RenderingSystem::RenderParticleStage()
+{
+    if (m_context.GetCurrentScene() != Scene::Sponza ||
+        !m_particleGraphicsPSO ||
+        !m_particleGraphicsRootSignature ||
+        !m_particleHeap ||
+        !m_particleBuffers[m_particleSourceIndex])
+    {
+        return;
+    }
+
+    UpdateParticleRenderConstants();
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    D3D12_VIEWPORT vp = m_context.GetViewport();
+    D3D12_RECT sc = m_context.GetScissorRect();
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_context.GetDepthStencilView();
+
+    commandList->RSSetViewports(1, &vp);
+    commandList->RSSetScissorRects(1, &sc);
+    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, &dsv);
+    commandList->SetPipelineState(m_particleGraphicsPSO.Get());
+    commandList->SetGraphicsRootSignature(m_particleGraphicsRootSignature.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_particleHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootConstantBufferView(0, m_particleRenderConstantBuffer->GetGPUVirtualAddress());
+
+    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = m_particleHeap->GetGPUDescriptorHandleForHeapStart();
+    srvHandle.ptr += SIZE_T(m_particleSourceIndex == 0 ? kParticleSrvBuffer0 : kParticleSrvBuffer1) *
+        SIZE_T(m_particleDescriptorSize);
+    commandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE textureHandle = m_particleHeap->GetGPUDescriptorHandleForHeapStart();
+    textureHandle.ptr += SIZE_T(kParticleTextureSrv) * SIZE_T(m_particleDescriptorSize);
+    commandList->SetGraphicsRootDescriptorTable(2, textureHandle);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+    commandList->DrawInstanced(MaxDustParticles, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER backToUav{};
+    backToUav.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    backToUav.Transition.pResource = m_particleBuffers[m_particleSourceIndex].Get();
+    backToUav.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    backToUav.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    backToUav.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    commandList->ResourceBarrier(1, &backToUav);
+}
+
+void RenderingSystem::InitializeFireData()
+{
+    if (m_fireUploadBuffer == nullptr || m_fireCounterUploadBuffer == nullptr)
+    {
+        return;
+    }
+
+    std::vector<FireParticleCPU> particles(MaxFireParticles);
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const XMFLOAT3 fireCenter(
+        sceneCenter.x - sceneExtents.x * 0.08f,
+        sceneCenter.y - sceneExtents.y * 0.72f,
+        sceneCenter.z + sceneExtents.z * 0.04f);
+
+    for (UINT i = 0; i < MaxFireParticles; ++i)
+    {
+        const float seed0 = Hash01(i * 13u + 5u);
+        const float seed1 = Hash01(i * 37u + 17u);
+        const float seed2 = Hash01(i * 61u + 9u);
+        const float seed3 = Hash01(i * 97u + 29u);
+
+        FireParticleCPU particle{};
+        particle.Position = XMFLOAT3(
+            fireCenter.x + (seed0 * 2.0f - 1.0f) * 18.0f,
+            fireCenter.y + seed1 * 24.0f,
+            fireCenter.z + (seed2 * 2.0f - 1.0f) * 18.0f);
+        particle.Size = 5.4f + seed3 * 6.8f;
+        particle.Velocity = XMFLOAT3(
+            (seed0 * 2.0f - 1.0f) * 4.8f,
+            24.0f + seed1 * 22.0f,
+            (seed2 * 2.0f - 1.0f) * 4.8f);
+        particle.Seed = seed3;
+        particles[i] = particle;
+    }
+
+    void* fireData = nullptr;
+    if (SUCCEEDED(m_fireUploadBuffer->Map(0, nullptr, &fireData)) && fireData != nullptr)
+    {
+        std::memcpy(fireData, particles.data(), sizeof(FireParticleCPU) * MaxFireParticles);
+        m_fireUploadBuffer->Unmap(0, nullptr);
+    }
+
+    UINT* counterData = nullptr;
+    if (SUCCEEDED(m_fireCounterUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&counterData))) &&
+        counterData != nullptr)
+    {
+        counterData[0] = MaxFireParticles;
+        counterData[1] = 0;
+        m_fireCounterUploadBuffer->Unmap(0, nullptr);
+    }
+}
+
+void RenderingSystem::ResetFireCounters(ID3D12GraphicsCommandList* commandList, bool resetSourceCounter)
+{
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    const UINT destinationIndex = 1u - m_fireSourceIndex;
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    UINT barrierCount = 0;
+
+    if (resetSourceCounter)
+    {
+        barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[barrierCount].Transition.pResource = m_fireCounterBuffers[m_fireSourceIndex].Get();
+        barriers[barrierCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[barrierCount].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barriers[barrierCount].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        ++barrierCount;
+    }
+
+    barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[barrierCount].Transition.pResource = m_fireCounterBuffers[destinationIndex].Get();
+    barriers[barrierCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[barrierCount].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[barrierCount].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    ++barrierCount;
+    commandList->ResourceBarrier(barrierCount, barriers);
+
+    if (resetSourceCounter)
+    {
+        commandList->CopyBufferRegion(
+            m_fireCounterBuffers[m_fireSourceIndex].Get(),
+            0,
+            m_fireCounterUploadBuffer.Get(),
+            0,
+            sizeof(UINT));
+    }
+
+    commandList->CopyBufferRegion(
+        m_fireCounterBuffers[destinationIndex].Get(),
+        0,
+        m_fireCounterUploadBuffer.Get(),
+        sizeof(UINT),
+        sizeof(UINT));
+
+    D3D12_RESOURCE_BARRIER toUav[2]{};
+    UINT toUavCount = 0;
+    if (resetSourceCounter)
+    {
+        toUav[toUavCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toUav[toUavCount].Transition.pResource = m_fireCounterBuffers[m_fireSourceIndex].Get();
+        toUav[toUavCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        toUav[toUavCount].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        toUav[toUavCount].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        ++toUavCount;
+    }
+
+    toUav[toUavCount].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toUav[toUavCount].Transition.pResource = m_fireCounterBuffers[destinationIndex].Get();
+    toUav[toUavCount].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    toUav[toUavCount].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    toUav[toUavCount].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    ++toUavCount;
+    commandList->ResourceBarrier(toUavCount, toUav);
+}
+
+void RenderingSystem::UpdateFireSimulationConstants(float deltaTime)
+{
+    if (m_fireSimulationCBMappedData == nullptr)
+    {
+        return;
+    }
+
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const XMFLOAT3 fireCenter(
+        sceneCenter.x - sceneExtents.x * 0.08f,
+        sceneCenter.y - sceneExtents.y * 0.72f,
+        sceneCenter.z + sceneExtents.z * 0.04f);
+
+    ParticleSimCB cb{};
+    cb.DeltaTimeTime = XMFLOAT4(deltaTime, m_context.GetTime(), static_cast<float>(MaxFireParticles), 0.0f);
+    cb.BoundsMin = XMFLOAT4(fireCenter.x - 22.0f, fireCenter.y, fireCenter.z - 22.0f, 0.0f);
+    cb.BoundsMax = XMFLOAT4(fireCenter.x + 22.0f, fireCenter.y + 118.0f, fireCenter.z + 22.0f, 0.0f);
+    cb.NoiseParams = XMFLOAT4(fireCenter.x, fireCenter.y, fireCenter.z, 1.0f);
+    std::memcpy(m_fireSimulationCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateFireRenderConstants()
+{
+    if (m_fireRenderCBMappedData == nullptr)
+    {
+        return;
+    }
+
+    const XMFLOAT3 cameraPosValue = m_context.GetCameraPosition();
+    const XMFLOAT3 cameraTargetValue = m_context.GetCameraTarget();
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const XMFLOAT3 fireCenter(
+        sceneCenter.x - sceneExtents.x * 0.08f,
+        sceneCenter.y - sceneExtents.y * 0.72f,
+        sceneCenter.z + sceneExtents.z * 0.04f);
+
+    XMVECTOR cameraPos = XMLoadFloat3(&cameraPosValue);
+    XMVECTOR cameraTarget = XMLoadFloat3(&cameraTargetValue);
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    XMMATRIX view = XMMatrixLookAtLH(cameraPos, cameraTarget, up);
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(
+        XM_PIDIV4,
+        static_cast<float>(m_width) / static_cast<float>(m_height),
+        1.0f,
+        20000.0f);
+    XMMATRIX viewProj = XMMatrixMultiply(view, proj);
+
+    XMFLOAT3 forwardValue = XMFLOAT3(
+        cameraTargetValue.x - cameraPosValue.x,
+        cameraTargetValue.y - cameraPosValue.y,
+        cameraTargetValue.z - cameraPosValue.z);
+    XMVECTOR forward = XMVector3Normalize(XMLoadFloat3(&forwardValue));
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, forward));
+    XMVECTOR billboardUp = XMVector3Normalize(XMVector3Cross(forward, right));
+
+    XMFLOAT3 rightValue{};
+    XMFLOAT3 upValue{};
+    XMStoreFloat3(&rightValue, right);
+    XMStoreFloat3(&upValue, billboardUp);
+
+    ParticleRenderCB cb{};
+    XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(viewProj));
+    cb.CameraRight = XMFLOAT4(rightValue.x, rightValue.y, rightValue.z, 0.0f);
+    cb.CameraUp = XMFLOAT4(upValue.x, upValue.y, upValue.z, 0.0f);
+    cb.DustColor = XMFLOAT4(1.0f, 0.55f, 0.08f, 1.0f);
+    cb.EffectParams = XMFLOAT4(
+        fireCenter.y,
+        fireCenter.y + 118.0f,
+        0.0f,
+        0.0f);
+    std::memcpy(m_fireRenderCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateFireSimulation()
+{
+    if (m_context.GetCurrentScene() != Scene::Sponza ||
+        !m_fireComputePSO ||
+        !m_fireComputeRootSignature ||
+        !m_fireHeap)
+    {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    if (!m_fireDataInitialized)
+    {
+        InitializeFireData();
+        commandList->CopyResource(m_fireBuffers[m_fireSourceIndex].Get(), m_fireUploadBuffer.Get());
+        commandList->CopyResource(m_fireBuffers[1u - m_fireSourceIndex].Get(), m_fireUploadBuffer.Get());
+
+        D3D12_RESOURCE_BARRIER initBarriers[4]{};
+        for (UINT i = 0; i < 2; ++i)
+        {
+            initBarriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            initBarriers[i].Transition.pResource = m_fireBuffers[i].Get();
+            initBarriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            initBarriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            initBarriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+            initBarriers[2 + i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            initBarriers[2 + i].Transition.pResource = m_fireCounterBuffers[i].Get();
+            initBarriers[2 + i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            initBarriers[2 + i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            initBarriers[2 + i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        commandList->ResourceBarrier(_countof(initBarriers), initBarriers);
+        ResetFireCounters(commandList, true);
+        m_fireDataInitialized = true;
+        m_previousFireTime = m_context.GetTime();
+    }
+
+    float deltaTime = m_context.GetTime() - m_previousFireTime;
+    if (deltaTime < 0.0f)
+    {
+        deltaTime = 0.0f;
+    }
+    if (deltaTime > 0.033f)
+    {
+        deltaTime = 0.033f;
+    }
+    m_previousFireTime = m_context.GetTime();
+
+    UpdateFireSimulationConstants(deltaTime);
+    ResetFireCounters(commandList, false);
+
+    ID3D12DescriptorHeap* heaps[] = { m_fireHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetPipelineState(m_fireComputePSO.Get());
+    commandList->SetComputeRootSignature(m_fireComputeRootSignature.Get());
+    commandList->SetComputeRootConstantBufferView(0, m_fireSimulationConstantBuffer->GetGPUVirtualAddress());
+
+    const UINT destinationIndex = 1u - m_fireSourceIndex;
+    D3D12_GPU_DESCRIPTOR_HANDLE consumeHandle = m_fireHeap->GetGPUDescriptorHandleForHeapStart();
+    consumeHandle.ptr += SIZE_T((m_fireSourceIndex == 0) ? kFireUavBuffer0 : kFireUavBuffer1) * SIZE_T(m_fireDescriptorSize);
+    commandList->SetComputeRootDescriptorTable(1, consumeHandle);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE appendHandle = m_fireHeap->GetGPUDescriptorHandleForHeapStart();
+    appendHandle.ptr += SIZE_T((destinationIndex == 0) ? kFireUavBuffer0 : kFireUavBuffer1) * SIZE_T(m_fireDescriptorSize);
+    commandList->SetComputeRootDescriptorTable(2, appendHandle);
+
+    const UINT groupCount = (MaxFireParticles + kFireThreadGroupSize - 1) / kFireThreadGroupSize;
+    commandList->Dispatch(groupCount, 1, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarrier[4]{};
+    for (UINT i = 0; i < 2; ++i)
+    {
+        uavBarrier[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier[i].UAV.pResource = m_fireBuffers[i].Get();
+        uavBarrier[2 + i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier[2 + i].UAV.pResource = m_fireCounterBuffers[i].Get();
+    }
+    commandList->ResourceBarrier(_countof(uavBarrier), uavBarrier);
+
+    D3D12_RESOURCE_BARRIER toSrv{};
+    toSrv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toSrv.Transition.pResource = m_fireBuffers[destinationIndex].Get();
+    toSrv.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &toSrv);
+
+    m_fireSourceIndex = destinationIndex;
+}
+
+void RenderingSystem::RenderFireStage()
+{
+    if (m_context.GetCurrentScene() != Scene::Sponza ||
+        !m_fireGraphicsPSO ||
+        !m_fireGraphicsRootSignature ||
+        !m_fireHeap ||
+        !m_fireBuffers[m_fireSourceIndex])
+    {
+        return;
+    }
+
+    UpdateFireRenderConstants();
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    D3D12_VIEWPORT vp = m_context.GetViewport();
+    D3D12_RECT sc = m_context.GetScissorRect();
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_context.GetDepthStencilView();
+
+    commandList->RSSetViewports(1, &vp);
+    commandList->RSSetScissorRects(1, &sc);
+    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, &dsv);
+    commandList->SetPipelineState(m_fireGraphicsPSO.Get());
+    commandList->SetGraphicsRootSignature(m_fireGraphicsRootSignature.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_fireHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootConstantBufferView(0, m_fireRenderConstantBuffer->GetGPUVirtualAddress());
+
+    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = m_fireHeap->GetGPUDescriptorHandleForHeapStart();
+    srvHandle.ptr += SIZE_T(m_fireSourceIndex == 0 ? kFireSrvBuffer0 : kFireSrvBuffer1) * SIZE_T(m_fireDescriptorSize);
+    commandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+    commandList->DrawInstanced(MaxFireParticles, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER backToUav{};
+    backToUav.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    backToUav.Transition.pResource = m_fireBuffers[m_fireSourceIndex].Get();
+    backToUav.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    backToUav.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    backToUav.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    commandList->ResourceBarrier(1, &backToUav);
 }
 // передача источников света в буфер света
 bool RenderingSystem::CreateLightingConstantBuffer()
