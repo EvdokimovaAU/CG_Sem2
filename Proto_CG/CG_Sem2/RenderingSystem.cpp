@@ -1218,10 +1218,16 @@ bool RenderingSystem::CreateParticleRenderPipeline()
     pso.RasterizerState.DepthClipEnable = TRUE;
     pso.BlendState.AlphaToCoverageEnable = FALSE;
     pso.BlendState.IndependentBlendEnable = FALSE;
-    pso.BlendState.RenderTarget[0].BlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
     pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pso.DepthStencilState.DepthEnable = TRUE;
-    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     pso.DepthStencilState.StencilEnable = FALSE;
     pso.NumRenderTargets = 1;
@@ -1883,10 +1889,16 @@ void RenderingSystem::InitializeParticleData()
     const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
     const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
 
-    const float halfWidth = (std::max)(sceneExtents.x * 0.42f, 180.0f);
-    const float halfDepth = (std::max)(sceneExtents.z * 0.30f, 140.0f);
     const float minY = sceneCenter.y - sceneExtents.y * 0.18f;
-    const float maxY = sceneCenter.y + sceneExtents.y * 0.28f;
+    const float sphereRadius = 18.0f;
+    const XMFLOAT3 sphereCenter(
+        sceneCenter.x,
+        minY + sphereRadius + 22.0f,
+        sceneCenter.z);
+    const XMFLOAT3 emitterPosition(
+        sphereCenter.x,
+        sphereCenter.y,
+        sphereCenter.z);
 
     for (UINT i = 0; i < MaxDustParticles; ++i)
     {
@@ -1894,18 +1906,55 @@ void RenderingSystem::InitializeParticleData()
         const float seed1 = Hash01(i * 29u + 7u);
         const float seed2 = Hash01(i * 43u + 19u);
         const float seed3 = Hash01(i * 71u + 3u);
+        const float seed4 = Hash01(i * 89u + 23u);
+        const float seed5 = Hash01(i * 113u + 47u);
 
         DustParticleCPU particle{};
-        particle.Position = XMFLOAT3(
-            sceneCenter.x + (seed0 * 2.0f - 1.0f) * halfWidth,
-            minY + seed1 * (maxY - minY),
-            sceneCenter.z + (seed2 * 2.0f - 1.0f) * halfDepth);
-        particle.Size = 1.2f + seed3 * 2.0f;
-        particle.Velocity = XMFLOAT3(
-            (seed1 * 2.0f - 1.0f) * 8.0f,
-            (seed3 * 2.0f - 1.0f) * 0.9f,
-            (seed0 * 2.0f - 1.0f) * 8.0f);
-        particle.Seed = 1.0f + static_cast<float>(i) * 0.6180339f;
+        particle.Seed = 1.0f + static_cast<float>(i) * 0.6180339f + seed2 * 11.0f;
+
+        if (i < SphereDustParticles)
+        {
+            const float z = seed0 * 2.0f - 1.0f;
+            const float angle = seed1 * XM_2PI;
+            const float radial = sqrtf((std::max)(0.0f, 1.0f - z * z));
+            const XMFLOAT3 dir(
+                cosf(angle) * radial,
+                z,
+                sinf(angle) * radial);
+
+            particle.Position = XMFLOAT3(
+                sphereCenter.x + dir.x * sphereRadius,
+                sphereCenter.y + dir.y * sphereRadius,
+                sphereCenter.z + dir.z * sphereRadius);
+            particle.Size = 1.6f + seed3 * 1.2f;
+            particle.Velocity = XMFLOAT3(0.0f, 0.0f, 0.0f);
+            particle.Age = 0.0f;
+            particle.Lifetime = 999999.0f;
+            particle.Kind = 1.0f;
+        }
+        else
+        {
+            const float zDynamic = seed0 * 2.0f - 1.0f;
+            const float angleDynamic = seed1 * XM_2PI;
+            const float radialDynamic = sqrtf((std::max)(0.0f, 1.0f - zDynamic * zDynamic));
+            const XMFLOAT3 dirDynamic(
+                cosf(angleDynamic) * radialDynamic,
+                zDynamic,
+                sinf(angleDynamic) * radialDynamic);
+
+            particle.Position = XMFLOAT3(
+                sphereCenter.x + dirDynamic.x * (sphereRadius * (0.8f + seed2 * 0.2f)),
+                sphereCenter.y + dirDynamic.y * (sphereRadius * (0.8f + seed2 * 0.2f)),
+                sphereCenter.z + dirDynamic.z * (sphereRadius * (0.8f + seed2 * 0.2f)));
+            particle.Size = 1.8f + seed3 * 2.0f;
+            particle.Velocity = XMFLOAT3(
+                dirDynamic.x * (18.0f + seed4 * 12.0f),
+                dirDynamic.y * (18.0f + seed5 * 12.0f),
+                dirDynamic.z * (18.0f + seed0 * 12.0f));
+            particle.Age = seed1 * (2.4f + seed4 * 1.7f);
+            particle.Lifetime = 2.4f + seed4 * 1.7f;
+            particle.Kind = 0.0f;
+        }
         particles[i] = particle;
     }
 
@@ -2006,20 +2055,35 @@ void RenderingSystem::UpdateParticleSimulationConstants(float deltaTime)
 
     const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
     const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const float halfWidth = (std::max)(sceneExtents.x * 0.42f, 180.0f);
+    const float halfDepth = (std::max)(sceneExtents.z * 0.30f, 140.0f);
+    const float minY = sceneCenter.y - sceneExtents.y * 0.18f;
+    const float maxY = sceneCenter.y + sceneExtents.y * 0.28f;
+    const float sphereRadius = 18.0f;
+    const XMFLOAT3 sphereCenter(
+        sceneCenter.x,
+        minY + sphereRadius + 22.0f,
+        sceneCenter.z);
+    const XMFLOAT3 emitterPosition(
+        sphereCenter.x,
+        sphereCenter.y,
+        sphereCenter.z);
 
     ParticleSimCB cb{};
     cb.DeltaTimeTime = XMFLOAT4(deltaTime, m_context.GetTime(), static_cast<float>(MaxDustParticles), 0.0f);
     cb.BoundsMin = XMFLOAT4(
-        sceneCenter.x - (std::max)(sceneExtents.x * 0.42f, 180.0f),
-        sceneCenter.y - sceneExtents.y * 0.18f,
-        sceneCenter.z - (std::max)(sceneExtents.z * 0.30f, 140.0f),
+        sceneCenter.x - halfWidth,
+        minY,
+        sceneCenter.z - halfDepth,
         0.0f);
     cb.BoundsMax = XMFLOAT4(
-        sceneCenter.x + (std::max)(sceneExtents.x * 0.42f, 180.0f),
-        sceneCenter.y + sceneExtents.y * 0.28f,
-        sceneCenter.z + (std::max)(sceneExtents.z * 0.30f, 140.0f),
+        sceneCenter.x + halfWidth,
+        maxY,
+        sceneCenter.z + halfDepth,
         0.0f);
-    cb.NoiseParams = XMFLOAT4(1.55f, 1.20f, 0.40f, 0.0f);
+    cb.NoiseParams = XMFLOAT4(2.6f, -9.0f, 0.08f, 0.82f);
+    cb.EmitterPosition = XMFLOAT4(emitterPosition.x, emitterPosition.y, emitterPosition.z, sphereRadius);
+    cb.SphereData = XMFLOAT4(sphereCenter.x, sphereCenter.y, sphereCenter.z, sphereRadius);
 
     std::memcpy(m_particleSimulationCBMappedData, &cb, sizeof(cb));
 }
@@ -2033,6 +2097,14 @@ void RenderingSystem::UpdateParticleRenderConstants()
 
     const XMFLOAT3 cameraPosValue = m_context.GetCameraPosition();
     const XMFLOAT3 cameraTargetValue = m_context.GetCameraTarget();
+    const XMFLOAT3 sceneCenter = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const float sphereRadius = 18.0f;
+    const float minY = sceneCenter.y - sceneExtents.y * 0.18f;
+    const XMFLOAT3 sphereCenter(
+        sceneCenter.x,
+        minY + sphereRadius + 22.0f,
+        sceneCenter.z);
 
     XMVECTOR cameraPos = XMLoadFloat3(&cameraPosValue);
     XMVECTOR cameraTarget = XMLoadFloat3(&cameraTargetValue);
@@ -2063,8 +2135,8 @@ void RenderingSystem::UpdateParticleRenderConstants()
     XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(viewProj));
     cb.CameraRight = XMFLOAT4(rightValue.x, rightValue.y, rightValue.z, 0.0f);
     cb.CameraUp = XMFLOAT4(upValue.x, upValue.y, upValue.z, 0.0f);
-    cb.DustColor = XMFLOAT4(0.70f, 0.66f, 0.58f, 1.0f);
-    cb.EffectParams = XMFLOAT4(0.0f, 1.0f, 0.0f, 0.0f);
+    cb.DustColor = XMFLOAT4(0.34f, 0.78f, 1.0f, 1.0f);
+    cb.EffectParams = XMFLOAT4(sphereCenter.x, sphereCenter.y, sphereCenter.z, sphereRadius);
 
     std::memcpy(m_particleRenderCBMappedData, &cb, sizeof(cb));
 }

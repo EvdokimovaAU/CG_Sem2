@@ -98,6 +98,7 @@ private:
     static constexpr UINT MaxPointLights = 6;
     static constexpr UINT MaxSpotLights = 4;
     static constexpr UINT MaxDustParticles = 512;
+    static constexpr UINT SphereDustParticles = 192;
     static constexpr UINT MaxFireParticles = 256;
 
     struct DeferredLightCB
@@ -134,6 +135,8 @@ private:
         DirectX::XMFLOAT4 BoundsMin;
         DirectX::XMFLOAT4 BoundsMax;
         DirectX::XMFLOAT4 NoiseParams;
+        DirectX::XMFLOAT4 EmitterPosition;
+        DirectX::XMFLOAT4 SphereData;
     };
 
     struct ParticleRenderCB
@@ -151,6 +154,9 @@ private:
         float Size = 1.0f;
         DirectX::XMFLOAT3 Velocity;
         float Seed = 0.0f;
+        float Age = 0.0f;
+        float Lifetime = 1.0f;
+        float Kind = 0.0f;
     };
 
     struct FireParticleCPU

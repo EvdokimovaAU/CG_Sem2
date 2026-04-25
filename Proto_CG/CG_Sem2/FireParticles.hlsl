@@ -12,6 +12,8 @@ cbuffer FireSimulationCB : register(b0)
     float4 BoundsMin;
     float4 BoundsMax;
     float4 FireOrigin;
+    float4 EmitterPosition;
+    float4 SphereData;
 };
 
 cbuffer FireRenderCB : register(b1)
