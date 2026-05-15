@@ -175,10 +175,14 @@ GBufferOutput PSMain(PSInput input)
     float4 albedo = SampleByLodStrength(gTex, uv, lodFilterStrength);
     albedo.rgb = saturate(pow(albedo.rgb, 1.08f) * 0.82f);
     float roughness = SampleByLodStrength(gRoughnessTex, uv, lodFilterStrength).r;
+    roughness = saturate(0.18f + roughness * 0.72f);
     float3 normalSample = SampleByLodStrength(gNormalTex, uv, lodFilterStrength).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
-    float3x3 tbn = ComputeTBN(normalize(input.NormalW), input.WorldPos, uv);
-    float3 normal = normalize(mul(normalSample, tbn));
+    float3 baseNormal = normalize(input.NormalW);
+    float3x3 tbn = ComputeTBN(baseNormal, input.WorldPos, uv);
+    float3 mappedNormal = normalize(mul(normalSample, tbn));
+    float normalMapStrength = saturate(TimeParams.z);
+    float3 normal = normalize(lerp(baseNormal, mappedNormal, 0.42f * normalMapStrength));
     float depth = saturate(input.ViewDepth / 20000.0f);
 
     o.AlbedoSpec = float4(albedo.rgb, roughness);

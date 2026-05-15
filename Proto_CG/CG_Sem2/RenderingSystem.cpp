@@ -2755,8 +2755,8 @@ void RenderingSystem::UpdateLightingConstants()
 
         // Imported Sponza lighting setup: directional + point + spot.
         cb.LightDirection = XMFLOAT4(-0.4f, -1.0f, -0.2f, 0.0f);
-        cb.LightColor = XMFLOAT4(0.92f, 0.91f, 0.89f, 0.22f);
-        cb.AmbientColor = XMFLOAT4(0.010f, 0.010f, 0.012f, 1.0f);
+        cb.LightColor = XMFLOAT4(0.94f, 0.93f, 0.91f, 0.42f);
+        cb.AmbientColor = XMFLOAT4(0.028f, 0.028f, 0.032f, 1.0f);
         cb.LightCounts = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
 
         cb.PointLightPositionRange[0] = XMFLOAT4(
@@ -2764,15 +2764,15 @@ void RenderingSystem::UpdateLightingConstants()
             sceneCenter.y + sceneExtents.y * 0.25f,
             sceneCenter.z - sceneExtents.z * 0.10f,
             pointRange);
-        cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 7.50f);
+        cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 3.90f);
 
         cb.SpotLightPositionRange[0] = XMFLOAT4(
             sceneCenter.x + sceneExtents.x * 0.28f,
             sceneCenter.y + sceneExtents.y * 0.75f,
             sceneCenter.z - sceneExtents.z * 0.25f,
             spotRange);
-        cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.22f, -0.95f, 0.18f, 0.82f);
-        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 8.00f);
+        cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.22f, -0.95f, 0.18f, 0.42f);
+        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 2.70f);
     }
     else if (m_context.GetCurrentScene() == Scene::ChickenField)
     {

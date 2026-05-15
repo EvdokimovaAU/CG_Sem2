@@ -1076,7 +1076,13 @@ void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UIN
         }
     }
 
-    m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, 0.0f, 0.0f);
+    float normalMapStrength = 1.0f;
+    if (m_currentScene == Scene::Sponza)
+    {
+        normalMapStrength = 0.0f;
+    }
+
+    m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, normalMapStrength, 0.0f);
     if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
     {
         // More visible displacement with a lower tessellation budget.
@@ -1819,7 +1825,7 @@ bool D3D12Context::CreateRootSignature()
 
     // правила чтения текстуры
     D3D12_STATIC_SAMPLER_DESC staticSampler{};
-    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     staticSampler.MaxAnisotropy = 1;
     staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;

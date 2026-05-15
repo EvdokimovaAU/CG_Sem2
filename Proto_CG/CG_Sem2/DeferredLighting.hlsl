@@ -88,9 +88,10 @@ float3 EvaluateLight(
     }
 
     float smoothness = 1.0f - roughness;
-    float clampedRoughness = clamp(lerp(0.045f, 1.0f, roughness * 0.82f), 0.045f, 1.0f);
-    float3 F0 = lerp(float3(0.035f, 0.035f, 0.035f), float3(0.065f, 0.065f, 0.065f), smoothness * 0.65f);
+    float clampedRoughness = clamp(lerp(0.12f, 1.0f, roughness * 0.90f), 0.12f, 1.0f);
+    float3 F0 = lerp(float3(0.026f, 0.026f, 0.026f), float3(0.045f, 0.045f, 0.045f), smoothness * 0.45f);
     float3 F = FresnelSchlick(HdotV, F0);
+    F *= lerp(0.72f, 0.90f, roughness);
     float D = DistributionGGX(N, H, clampedRoughness);
     float G = GeometrySmith(N, V, L, clampedRoughness);
 
@@ -98,7 +99,7 @@ float3 EvaluateLight(
     float denominator = max(4.0f * NdotV * NdotL, 0.0001f);
     float3 specular = numerator / denominator;
 
-    float3 kd = (1.0f.xxx - F) * (1.0f - smoothness * 0.08f);
+    float3 kd = (1.0f.xxx - F) * (1.0f - smoothness * 0.05f);
     float3 diffuse = kd * albedo / 3.14159265f;
     return (diffuse + specular) * radiance * NdotL;
 }
@@ -125,11 +126,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(cameraPos - worldPos);
 
     float upFactor = saturate(normal.y * 0.5f + 0.5f);
-    float3 skyAmbient = AmbientColor.rgb * lerp(0.55f, 1.15f, upFactor);
-    float3 lit = skyAmbient * albedo * (1.0f - roughness * 0.22f);
-    float3 ambientF0 = lerp(float3(0.035f, 0.035f, 0.035f), float3(0.065f, 0.065f, 0.065f), smoothness * 0.65f);
-    float3 ambientSpecular = FresnelSchlick(saturate(dot(normal, V)), ambientF0) * lerp(0.015f, 0.11f, smoothness) * lerp(0.55f, 1.15f, upFactor);
+    float3 skyAmbient = AmbientColor.rgb * lerp(0.72f, 1.18f, upFactor);
+    float3 lit = skyAmbient * albedo * (1.0f - roughness * 0.18f);
+    float3 ambientF0 = lerp(float3(0.026f, 0.026f, 0.026f), float3(0.045f, 0.045f, 0.045f), smoothness * 0.45f);
+    float viewFacing = saturate(dot(normal, V));
+    float3 ambientSpecular = FresnelSchlick(viewFacing, ambientF0) * lerp(0.006f, 0.032f, smoothness) * lerp(0.50f, 0.92f, upFactor);
+    ambientSpecular *= lerp(0.55f, 1.0f, viewFacing);
     lit += ambientSpecular;
+    lit += albedo * 0.030f;
 
     float3 directionalL = normalize(-LightDirection.xyz);
     float3 directionalRadiance = LightColor.rgb * LightColor.a;
@@ -144,7 +148,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 toLight = PointLightPositionRange[i].xyz - worldPos;
         float dist = length(toLight);
         float range = max(PointLightPositionRange[i].w, 0.0001f);
-        float falloff = saturate(1.0f - dist / range);
+        float normalizedDist = saturate(dist / range);
+        float falloff = 1.0f - normalizedDist * normalizedDist;
         float attenuation = falloff * falloff;
         float3 L = toLight / max(dist, 0.0001f);
         float3 radiance = PointLightColorIntensity[i].rgb * (PointLightColorIntensity[i].a * attenuation);
@@ -159,13 +164,17 @@ float4 PSMain(PSInput input) : SV_TARGET
         float range = max(SpotLightPositionRange[i].w, 0.0001f);
         float3 L = toLight / max(dist, 0.0001f);
 
-        float falloff = saturate(1.0f - dist / range);
+        float normalizedDist = saturate(dist / range);
+        float falloff = 1.0f - normalizedDist * normalizedDist;
         float attenuation = falloff * falloff;
 
         float3 spotDir = normalize(SpotLightDirectionCosine[i].xyz);
-        float coneCos = SpotLightDirectionCosine[i].w;
-        float spotAmount = saturate((dot(-L, spotDir) - coneCos) / max(1.0f - coneCos, 0.0001f));
-        spotAmount = spotAmount * spotAmount * spotAmount;
+        float outerConeCos = SpotLightDirectionCosine[i].w;
+        float innerConeCos = lerp(outerConeCos, 1.0f, 0.14f);
+        float coneFactor = dot(-L, spotDir);
+        float spotAmount = smoothstep(outerConeCos, innerConeCos, coneFactor);
+        spotAmount = lerp(0.35f, 1.0f, spotAmount);
+        spotAmount *= spotAmount;
 
         float3 radiance = SpotLightColorIntensity[i].rgb * (SpotLightColorIntensity[i].a * attenuation * spotAmount);
         lit += EvaluateLight(albedo, roughness, normal, V, L, radiance);
