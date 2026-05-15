@@ -51,8 +51,11 @@ public:
     void RenderFrame();
 
 private:
+    struct DeferredLightCB;
+
     void RenderForwardFrame();
     void RenderDeferredFrame();
+    void RenderShadowStage();
     void RenderOpaqueStage();
     void RenderLightingStage();
     void RenderGBufferDebugOverlay();
@@ -61,6 +64,10 @@ private:
     void RenderTransparentStage();
     bool InitializeDeferredResources();
     bool CompileDeferredShaders();
+    bool CreateShadowResources();
+    bool CreateShadowRootSignature();
+    bool CreateShadowPipeline();
+    bool CreateLightingSrvHeap();
     bool CreateDeferredLightingRootSignature();
     bool CreateDeferredGeometryPipeline();
     bool CreateDeferredLightingPipeline();
@@ -92,11 +99,14 @@ private:
     void UpdateFireSimulationConstants(float deltaTime);
     void UpdateFireRenderConstants();
     void UpdateLightingConstants();
+    void UpdateShadowMatrices(DeferredLightCB& cb) const;
     void UpdateWaterConstants();
 
 private:
     static constexpr UINT MaxPointLights = 6;
     static constexpr UINT MaxSpotLights = 4;
+    static constexpr UINT ShadowCascadeCount = 4;
+    static constexpr UINT ShadowMapResolution = 2048;
     static constexpr UINT MaxDustParticles = 512;
     static constexpr UINT SphereDustParticles = 192;
     static constexpr UINT MaxFireParticles = 256;
@@ -113,6 +123,10 @@ private:
         DirectX::XMFLOAT4 SpotLightDirectionCosine[MaxSpotLights];
         DirectX::XMFLOAT4 SpotLightColorIntensity[MaxSpotLights];
         DirectX::XMFLOAT4 ScreenSize;
+        DirectX::XMFLOAT4 CascadeSplits;
+        DirectX::XMFLOAT4 ShadowParams;
+        DirectX::XMFLOAT4X4 View;
+        DirectX::XMFLOAT4X4 LightViewProj[ShadowCascadeCount];
         DirectX::XMFLOAT4X4 InvView;
         DirectX::XMFLOAT4X4 InvProj;
     };
@@ -181,6 +195,9 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_shadowVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_shadowHS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_shadowDS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_debugOverlayPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_particleVS;
@@ -195,6 +212,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_waterHS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_waterDS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_waterPS;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_shadowRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_deferredLightingRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_debugOverlayRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_particleGraphicsRootSignature;
@@ -202,6 +220,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fireGraphicsRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fireComputeRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_waterRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_shadowPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredLightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_debugOverlayPSO;
@@ -210,6 +229,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_fireGraphicsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_fireComputePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waterPSO;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_lightingSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_deferredLightConstantBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_particleSimulationConstantBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_particleRenderConstantBuffer;
@@ -236,6 +258,9 @@ private:
     UINT8* m_waterCBMappedData = nullptr;
     UINT m_particleDescriptorSize = 0;
     UINT m_fireDescriptorSize = 0;
+    UINT m_shadowDsvDescriptorSize = 0;
+    UINT m_lightingSrvDescriptorSize = 0;
+    D3D12_RESOURCE_STATES m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     UINT m_particleSourceIndex = 0;
     UINT m_fireSourceIndex = 0;
     bool m_particleDataInitialized = false;

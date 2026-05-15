@@ -11,6 +11,10 @@ cbuffer DeferredLightCB : register(b0)
     float4 SpotLightDirectionCosine[4];
     float4 SpotLightColorIntensity[4];
     float4 ScreenSize;
+    float4 CascadeSplits;
+    float4 ShadowParams;
+    float4x4 View;
+    float4x4 LightViewProj[4];
     float4x4 InvView;
     float4x4 InvProj;
 };
@@ -19,6 +23,8 @@ Texture2D<float4> GAlbedoSpec : register(t0);
 Texture2D<float4> GWorldPos : register(t1);
 Texture2D<float4> GNormal : register(t2);
 Texture2D<float4> GDepth : register(t3);
+Texture2DArray<float> ShadowMap : register(t4);
+SamplerState ShadowSampler : register(s0);
 
 struct PSInput
 {
@@ -67,6 +73,71 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
+}
+
+float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
+{
+    const bool useStaticShadowSelection = ShadowParams.x > 0.5f;
+    const float bias = ShadowParams.z + (1.0f - saturate(dot(normal, lightDir))) * ShadowParams.w;
+    const float texelSize = ShadowParams.y;
+    const float viewDepth = mul(float4(worldPos, 1.0f), View).z;
+    uint startCascadeIndex = 0;
+
+    if (viewDepth > CascadeSplits.x) startCascadeIndex = 1;
+    if (viewDepth > CascadeSplits.y) startCascadeIndex = 2;
+    if (viewDepth > CascadeSplits.z) startCascadeIndex = 3;
+    if (!useStaticShadowSelection && viewDepth > CascadeSplits.w) return 1.0f;
+
+    float bestVisibility = 1.0f;
+    bool foundCascade = false;
+
+    [unroll]
+    for (uint cascadeIndex = (useStaticShadowSelection ? 0u : startCascadeIndex); cascadeIndex < 4; ++cascadeIndex)
+    {
+        float4 lightClip = mul(float4(worldPos, 1.0f), LightViewProj[cascadeIndex]);
+        float3 lightNdc = lightClip.xyz / max(lightClip.w, 0.0001f);
+        float2 shadowUv = lightNdc.xy * float2(0.5f, -0.5f) + 0.5f.xx;
+        float shadowDepth = lightNdc.z;
+        const float borderMargin = texelSize * 2.5f;
+
+        if (shadowUv.x <= -borderMargin || shadowUv.x >= 1.0f + borderMargin ||
+            shadowUv.y <= -borderMargin || shadowUv.y >= 1.0f + borderMargin ||
+            shadowDepth <= 0.0f || shadowDepth >= 1.0f)
+        {
+            continue;
+        }
+
+        shadowUv = clamp(shadowUv, texelSize.xx, 1.0f.xx - texelSize.xx);
+
+        float visibility = 0.0f;
+        [unroll]
+        for (int y = -1; y <= 1; ++y)
+        {
+            [unroll]
+            for (int x = -1; x <= 1; ++x)
+            {
+                const float2 offset = float2(x, y) * texelSize;
+                const float sampledDepth = ShadowMap.SampleLevel(
+                    ShadowSampler,
+                    float3(shadowUv + offset, cascadeIndex),
+                    0.0f);
+                visibility += ((shadowDepth - bias) <= sampledDepth) ? 1.0f : 0.0f;
+            }
+        }
+
+        visibility /= 9.0f;
+
+        if (useStaticShadowSelection)
+        {
+            bestVisibility = min(bestVisibility, visibility);
+            foundCascade = true;
+            continue;
+        }
+
+        return visibility;
+    }
+
+    return foundCascade ? bestVisibility : 1.0f;
 }
 
 float3 EvaluateLight(
@@ -137,7 +208,8 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 directionalL = normalize(-LightDirection.xyz);
     float3 directionalRadiance = LightColor.rgb * LightColor.a;
-    lit += EvaluateLight(albedo, roughness, normal, V, directionalL, directionalRadiance);
+    const float directionalShadow = ComputeShadow(worldPos, normal, directionalL);
+    lit += EvaluateLight(albedo, roughness, normal, V, directionalL, directionalRadiance) * directionalShadow;
 
     const int pointCount = (int)LightCounts.x;
     const int spotCount = (int)LightCounts.y;
@@ -179,6 +251,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 radiance = SpotLightColorIntensity[i].rgb * (SpotLightColorIntensity[i].a * attenuation * spotAmount);
         lit += EvaluateLight(albedo, roughness, normal, V, L, radiance);
     }
+
+    lit *= lerp(0.28f, 1.0f, directionalShadow);
 
     float3 litSRGB = pow(saturate(lit), 1.0f / 2.2f);
     return float4(litSRGB, 1.0f);

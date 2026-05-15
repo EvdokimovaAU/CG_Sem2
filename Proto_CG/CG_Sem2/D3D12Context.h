@@ -58,6 +58,7 @@ struct SceneObject
     BoundingBox BoundsLocal{};
     BoundingBox BoundsWorld{};
     UINT DiffuseSrvIndex = UINT_MAX;
+    UINT MeshIndex = 0;
     bool Visible = true;
 };
 
@@ -106,6 +107,11 @@ public:
         ID3D12GraphicsCommandList* commandList,
         UINT textureRootParameterIndex,
         UINT displacementRootParameterIndex = UINT_MAX);
+    void DrawSceneShadowGeometry(
+        ID3D12GraphicsCommandList* commandList,
+        UINT displacementRootParameterIndex,
+        const DirectX::XMFLOAT4X4& viewMatrix,
+        const DirectX::XMFLOAT4X4& projMatrix);
 
     void UpdateCameraOrbit(
         float deltaTime,
@@ -156,6 +162,12 @@ private:
     bool CreateSRVHeap(UINT numDescriptors);
 
     void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex = 0);
+    void UpdateCBWithMatrices(
+        const DirectX::XMFLOAT4X4& worldMatrix,
+        const DirectX::XMFLOAT4X4& viewMatrix,
+        const DirectX::XMFLOAT4X4& projMatrix,
+        UINT objectIndex,
+        UINT lodIndex = 0);
     void BuildSceneObjects();
     void UpdateObjectVisibility();
     void BuildOctree();
@@ -220,6 +232,8 @@ private:
     UINT8* m_cbMappedData = nullptr;
     UINT m_constantBufferStride = 0;
     static constexpr UINT MaxSceneObjects = 2048;
+    static constexpr UINT ShadowPassCBOffset = MaxSceneObjects;
+    static constexpr UINT MaxSceneConstantBufferSlots = MaxSceneObjects * 2;
 
     float m_time = 0.0f;
     float m_rotationT = 0.0f;
@@ -238,6 +252,7 @@ private:
 
     std::vector<Submesh> m_submeshes;
     std::vector<MeshData> m_lodMeshes;
+    std::vector<MeshData> m_sceneMeshes;
     std::vector<SceneObject> m_sceneObjects;
     std::vector<std::string> m_materialDiffusePaths;
     std::vector<UINT> m_materialToSrv;

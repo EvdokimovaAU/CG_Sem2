@@ -1,9 +1,11 @@
 ﻿#include "RenderingSystem.h"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,7 @@ namespace
     constexpr UINT kFireUavBuffer0 = 2;
     constexpr UINT kFireUavBuffer1 = 3;
     constexpr UINT kFireThreadGroupSize = 64;
+    constexpr UINT kLightingSrvCount = GBuffer::TargetCount + 1;
 
     struct DebugOverlayConstants
     {
@@ -88,6 +91,13 @@ namespace
         wcscpy_s(outPath, outPathCount, exeDir);
         wcscat_s(outPath, outPathCount, relativePath);
         return GetFileAttributesW(outPath) != INVALID_FILE_ATTRIBUTES;
+    }
+
+    XMFLOAT4X4 StoreMatrix(const XMMATRIX& matrix)
+    {
+        XMFLOAT4X4 result{};
+        XMStoreFloat4x4(&result, matrix);
+        return result;
     }
 }
 
@@ -159,7 +169,9 @@ void RenderingSystem::Shutdown()
     m_fireSimulationConstantBuffer.Reset();
     m_fireRenderConstantBuffer.Reset();
     m_waterConstantBuffer.Reset();
+    m_shadowMap.Reset();
     m_deferredGeometryPSO.Reset();
+    m_shadowPSO.Reset();
     m_deferredLightingPSO.Reset();
     m_debugOverlayPSO.Reset();
     m_particleGraphicsPSO.Reset();
@@ -167,6 +179,7 @@ void RenderingSystem::Shutdown()
     m_fireGraphicsPSO.Reset();
     m_fireComputePSO.Reset();
     m_waterPSO.Reset();
+    m_shadowRootSignature.Reset();
     m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
     m_particleGraphicsRootSignature.Reset();
@@ -180,6 +193,9 @@ void RenderingSystem::Shutdown()
     m_deferredGeometryPS.Reset();
     m_deferredLightingVS.Reset();
     m_deferredLightingPS.Reset();
+    m_shadowVS.Reset();
+    m_shadowHS.Reset();
+    m_shadowDS.Reset();
     m_debugOverlayVS.Reset();
     m_debugOverlayPS.Reset();
     m_particleVS.Reset();
@@ -203,6 +219,8 @@ void RenderingSystem::Shutdown()
     m_particleTexture.Reset();
     m_particleTextureUpload.Reset();
     m_particleHeap.Reset();
+    m_shadowDsvHeap.Reset();
+    m_lightingSrvHeap.Reset();
     m_fireBuffers[0].Reset();
     m_fireBuffers[1].Reset();
     m_fireCounterBuffers[0].Reset();
@@ -331,6 +349,7 @@ void RenderingSystem::RenderDeferredFrame()
     m_context.BeginFrame();
     UpdateParticleSimulation();
     UpdateFireSimulation();
+    RenderShadowStage();
     RenderOpaqueStage();
     RenderLightingStage();
     RenderFireStage();
@@ -338,6 +357,72 @@ void RenderingSystem::RenderDeferredFrame()
     RenderGBufferDebugOverlay();
     RenderTransparentStage();
     m_context.EndFrame();
+}
+
+void RenderingSystem::RenderShadowStage()
+{
+    if (!m_shadowPSO || !m_shadowRootSignature || !m_shadowMap || !m_shadowDsvHeap)
+    {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    UpdateLightingConstants();
+    const DeferredLightCB shadowCb = *reinterpret_cast<const DeferredLightCB*>(m_deferredLightCBMappedData);
+    static const XMFLOAT4X4 identity = StoreMatrix(XMMatrixIdentity());
+
+    if (m_shadowMapState != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+    {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = m_shadowMap.Get();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = m_shadowMapState;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        commandList->ResourceBarrier(1, &barrier);
+        m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+
+    commandList->SetPipelineState(m_shadowPSO.Get());
+    commandList->SetGraphicsRootSignature(m_shadowRootSignature.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_context.GetSceneSRVHeap() };
+    commandList->SetDescriptorHeaps(1, heaps);
+
+    D3D12_VIEWPORT shadowViewport{};
+    shadowViewport.Width = static_cast<float>(ShadowMapResolution);
+    shadowViewport.Height = static_cast<float>(ShadowMapResolution);
+    shadowViewport.MaxDepth = 1.0f;
+    D3D12_RECT shadowScissor{ 0, 0, static_cast<LONG>(ShadowMapResolution), static_cast<LONG>(ShadowMapResolution) };
+    commandList->RSSetViewports(1, &shadowViewport);
+    commandList->RSSetScissorRects(1, &shadowScissor);
+
+    for (UINT cascadeIndex = 0; cascadeIndex < ShadowCascadeCount; ++cascadeIndex)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        dsv.ptr += SIZE_T(cascadeIndex) * SIZE_T(m_shadowDsvDescriptorSize);
+        commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        commandList->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+        const XMMATRIX lightViewProj = XMMatrixTranspose(XMLoadFloat4x4(&shadowCb.LightViewProj[cascadeIndex]));
+        const XMFLOAT4X4 lightViewProjFloat = StoreMatrix(lightViewProj);
+        m_context.DrawSceneShadowGeometry(
+            commandList,
+            1,
+            identity,
+            lightViewProjFloat);
+    }
+
+    if (m_shadowMapState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = m_shadowMap.Get();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = m_shadowMapState;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        commandList->ResourceBarrier(1, &barrier);
+        m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
 }
 // свойства поверхности для GBuffer
 void RenderingSystem::RenderOpaqueStage()
@@ -384,9 +469,9 @@ void RenderingSystem::RenderLightingStage()
     commandList->SetPipelineState(m_deferredLightingPSO.Get());
     commandList->SetGraphicsRootSignature(m_deferredLightingRootSignature.Get());
 
-    ID3D12DescriptorHeap* heaps[] = { m_gbuffer.GetSRVHeap() };
+    ID3D12DescriptorHeap* heaps[] = { m_lightingSrvHeap.Get() };
     commandList->SetDescriptorHeaps(1, heaps);
-    commandList->SetGraphicsRootDescriptorTable(0, m_gbuffer.GetSRVGPU(GBuffer::Slot::AlbedoSpec));
+    commandList->SetGraphicsRootDescriptorTable(0, m_lightingSrvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->SetGraphicsRootConstantBufferView(1, m_deferredLightConstantBuffer->GetGPUVirtualAddress());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->DrawInstanced(3, 1, 0, 0);
@@ -426,6 +511,10 @@ void RenderingSystem::RenderTransparentStage()
 bool RenderingSystem::InitializeDeferredResources()
 {
     return CompileDeferredShaders() &&
+        CreateShadowResources() &&
+        CreateShadowRootSignature() &&
+        CreateShadowPipeline() &&
+        CreateLightingSrvHeap() &&
         CreateDeferredLightingRootSignature() &&
         CreateDeferredGeometryPipeline() &&
         CreateDeferredLightingPipeline() &&
@@ -457,12 +546,14 @@ bool RenderingSystem::CompileDeferredShaders()
 
     wchar_t geometryPath[MAX_PATH];
     wchar_t lightingPath[MAX_PATH];
+    wchar_t shadowPath[MAX_PATH];
     wchar_t debugPath[MAX_PATH];
     wchar_t particlePath[MAX_PATH];
     wchar_t firePath[MAX_PATH];
     wchar_t waterPath[MAX_PATH];
     if (!ResolveShaderPath(L"DeferredGeometry.hlsl", geometryPath, MAX_PATH) ||
         !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH) ||
+        !ResolveShaderPath(L"ShadowMap.hlsl", shadowPath, MAX_PATH) ||
         !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH) ||
         !ResolveShaderPath(L"ParticleDust.hlsl", particlePath, MAX_PATH) ||
         !ResolveShaderPath(L"FireParticles.hlsl", firePath, MAX_PATH) ||
@@ -555,6 +646,51 @@ bool RenderingSystem::CompileDeferredShaders()
         flags,
         0,
         &m_deferredLightingPS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        shadowPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_shadowVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        shadowPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "HSMain",
+        "hs_5_0",
+        flags,
+        0,
+        &m_shadowHS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        shadowPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "DSMain",
+        "ds_5_0",
+        flags,
+        0,
+        &m_shadowDS,
         nullptr);
     if (FAILED(hr))
     {
@@ -769,12 +905,199 @@ bool RenderingSystem::CompileDeferredShaders()
     return SUCCEEDED(hr);
 }
 
+bool RenderingSystem::CreateShadowResources()
+{
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = ShadowMapResolution;
+    desc.Height = ShadowMapResolution;
+    desc.DepthOrArraySize = ShadowCascadeCount;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+    clearValue.DepthStencil.Depth = 1.0f;
+    clearValue.DepthStencil.Stencil = 0;
+
+    if (FAILED(m_context.GetDevice()->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        &clearValue,
+        IID_PPV_ARGS(&m_shadowMap))))
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsvDesc{};
+    dsvDesc.NumDescriptors = ShadowCascadeCount;
+    dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    if (FAILED(m_context.GetDevice()->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&m_shadowDsvHeap))))
+    {
+        return false;
+    }
+
+    m_shadowDsvDescriptorSize = m_context.GetDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    m_shadowMapState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+
+    for (UINT cascadeIndex = 0; cascadeIndex < ShadowCascadeCount; ++cascadeIndex)
+    {
+        D3D12_DEPTH_STENCIL_VIEW_DESC viewDesc{};
+        viewDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        viewDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+        viewDesc.Texture2DArray.FirstArraySlice = cascadeIndex;
+        viewDesc.Texture2DArray.ArraySize = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += SIZE_T(cascadeIndex) * SIZE_T(m_shadowDsvDescriptorSize);
+        m_context.GetDevice()->CreateDepthStencilView(m_shadowMap.Get(), &viewDesc, handle);
+    }
+
+    return true;
+}
+
+bool RenderingSystem::CreateLightingSrvHeap()
+{
+    D3D12_DESCRIPTOR_HEAP_DESC desc{};
+    desc.NumDescriptors = kLightingSrvCount;
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(m_context.GetDevice()->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_lightingSrvHeap))))
+    {
+        return false;
+    }
+
+    m_lightingSrvDescriptorSize = m_context.GetDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    for (UINT slotIndex = 0; slotIndex < GBuffer::TargetCount; ++slotIndex)
+    {
+        const GBuffer::Slot slot = static_cast<GBuffer::Slot>(slotIndex);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = m_gbuffer.GetFormat(slot);
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += SIZE_T(slotIndex) * SIZE_T(m_lightingSrvDescriptorSize);
+        m_context.GetDevice()->CreateShaderResourceView(m_gbuffer.GetResource(slot), &srvDesc, handle);
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDesc{};
+    shadowSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    shadowSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    shadowSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    shadowSrvDesc.Texture2DArray.MipLevels = 1;
+    shadowSrvDesc.Texture2DArray.ArraySize = ShadowCascadeCount;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE shadowHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+    shadowHandle.ptr += SIZE_T(GBuffer::TargetCount) * SIZE_T(m_lightingSrvDescriptorSize);
+    m_context.GetDevice()->CreateShaderResourceView(m_shadowMap.Get(), &shadowSrvDesc, shadowHandle);
+    return true;
+}
+
+bool RenderingSystem::CreateShadowRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE displacementRange{};
+    displacementRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    displacementRange.NumDescriptors = 1;
+    displacementRange.BaseShaderRegister = 0;
+    displacementRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParams[2]{};
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[1].DescriptorTable.pDescriptorRanges = &displacementRange;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_DOMAIN;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_DOMAIN;
+
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = _countof(rootParams);
+    desc.pParameters = rootParams;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers = &sampler;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &desc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_shadowRootSignature)));
+}
+
+bool RenderingSystem::CreateShadowPipeline()
+{
+    D3D12_INPUT_ELEMENT_DESC layout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = { layout, _countof(layout) };
+    pso.pRootSignature = m_shadowRootSignature.Get();
+    pso.VS = { m_shadowVS->GetBufferPointer(), m_shadowVS->GetBufferSize() };
+    pso.HS = { m_shadowHS->GetBufferPointer(), m_shadowHS->GetBufferSize() };
+    pso.DS = { m_shadowDS->GetBufferPointer(), m_shadowDS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.RasterizerState.DepthBias = 240;
+    pso.RasterizerState.SlopeScaledDepthBias = 1.0f;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 0;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_shadowPSO)));
+}
+
 // что может читать шейдер
 bool RenderingSystem::CreateDeferredLightingRootSignature()
 {
     D3D12_DESCRIPTOR_RANGE srvRange{};
     srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = GBuffer::TargetCount;
+    srvRange.NumDescriptors = kLightingSrvCount;
     srvRange.BaseShaderRegister = 0;
     srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -788,9 +1111,22 @@ bool RenderingSystem::CreateDeferredLightingRootSignature()
     rootParams[1].Descriptor.ShaderRegister = 0;
     rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    D3D12_STATIC_SAMPLER_DESC shadowSampler{};
+    shadowSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    shadowSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    shadowSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    shadowSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    shadowSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    shadowSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    shadowSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    shadowSampler.ShaderRegister = 0;
+    shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     D3D12_ROOT_SIGNATURE_DESC desc{};
     desc.NumParameters = 2;
     desc.pParameters = rootParams;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers = &shadowSampler;
     desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serialized;
@@ -2750,29 +3086,29 @@ void RenderingSystem::UpdateLightingConstants()
     const float dominantExtent = (std::max)(sceneExtents.x, (std::max)(sceneExtents.y, sceneExtents.z));
     if (m_context.GetCurrentScene() == Scene::Sponza)
     {
-        const float pointRange = (std::max)(dominantExtent * 0.65f, 600.0f);
-        const float spotRange = (std::max)(dominantExtent * 0.90f, 900.0f);
+        const float pointRange = (std::max)(dominantExtent * 0.34f, 260.0f);
+        const float spotRange = (std::max)(dominantExtent * 0.44f, 360.0f);
 
         // Imported Sponza lighting setup: directional + point + spot.
         cb.LightDirection = XMFLOAT4(-0.4f, -1.0f, -0.2f, 0.0f);
-        cb.LightColor = XMFLOAT4(0.94f, 0.93f, 0.91f, 0.42f);
-        cb.AmbientColor = XMFLOAT4(0.028f, 0.028f, 0.032f, 1.0f);
+        cb.LightColor = XMFLOAT4(0.98f, 0.96f, 0.93f, 0.20f);
+        cb.AmbientColor = XMFLOAT4(0.009f, 0.009f, 0.012f, 1.0f);
         cb.LightCounts = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
 
         cb.PointLightPositionRange[0] = XMFLOAT4(
-            sceneCenter.x - sceneExtents.x * 0.35f,
-            sceneCenter.y + sceneExtents.y * 0.25f,
-            sceneCenter.z - sceneExtents.z * 0.10f,
+            sceneCenter.x - sceneExtents.x * 0.18f,
+            sceneCenter.y + sceneExtents.y * 0.20f,
+            sceneCenter.z - sceneExtents.z * 0.04f,
             pointRange);
-        cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 3.90f);
+        cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 3.80f);
 
         cb.SpotLightPositionRange[0] = XMFLOAT4(
-            sceneCenter.x + sceneExtents.x * 0.28f,
-            sceneCenter.y + sceneExtents.y * 0.75f,
-            sceneCenter.z - sceneExtents.z * 0.25f,
+            sceneCenter.x + sceneExtents.x * 0.14f,
+            sceneCenter.y + sceneExtents.y * 0.58f,
+            sceneCenter.z - sceneExtents.z * 0.08f,
             spotRange);
-        cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.22f, -0.95f, 0.18f, 0.42f);
-        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 2.70f);
+        cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.08f, -0.99f, 0.10f, 0.76f);
+        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 3.10f);
     }
     else if (m_context.GetCurrentScene() == Scene::ChickenField)
     {
@@ -2827,12 +3163,242 @@ void RenderingSystem::UpdateLightingConstants()
         1.0f,
         20000.0f);
 
+    XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
+    UpdateShadowMatrices(cb);
+
     XMMATRIX invView = XMMatrixInverse(nullptr, view);
     XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
     XMStoreFloat4x4(&cb.InvView, XMMatrixTranspose(invView));
     XMStoreFloat4x4(&cb.InvProj, XMMatrixTranspose(invProj));
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
+}
+
+void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
+{
+    const bool useStaticShadowCascades = (m_context.GetCurrentScene() != Scene::Sponza);
+    const XMFLOAT3 sceneCenterValue = m_context.GetSceneCenter();
+    const XMFLOAT3 sceneMinValue = m_context.GetSceneBoundsMin();
+    const XMFLOAT3 sceneMaxValue = m_context.GetSceneBoundsMax();
+    const XMFLOAT3 sceneExtents = m_context.GetSceneExtents();
+    const float dominantExtent = (std::max)(sceneExtents.x, (std::max)(sceneExtents.y, sceneExtents.z));
+    const float nearClip = 1.0f;
+    const float farClip = (std::min)(20000.0f, (std::max)(dominantExtent * 2.5f, 1400.0f));
+    const float aspect = static_cast<float>(m_width) / static_cast<float>(m_height);
+    const float fovY = XM_PIDIV4;
+    const float lambda = 0.85f;
+    const XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    const XMFLOAT3 cameraPosValue = m_context.GetCameraPosition();
+    const XMFLOAT3 cameraTargetValue = m_context.GetCameraTarget();
+    const XMVECTOR cameraPos = XMLoadFloat3(&cameraPosValue);
+    const XMVECTOR cameraTarget = XMLoadFloat3(&cameraTargetValue);
+    const XMMATRIX cameraView = XMMatrixLookAtLH(cameraPos, cameraTarget, worldUp);
+    const XMMATRIX invCameraView = XMMatrixInverse(nullptr, cameraView);
+
+    const XMVECTOR surfaceToLight = XMVector3Normalize(XMVectorSet(
+        -cb.LightDirection.x,
+        -cb.LightDirection.y,
+        -cb.LightDirection.z,
+        0.0f));
+
+    XMVECTOR lightUp = worldUp;
+    if (std::abs(XMVectorGetX(XMVector3Dot(lightUp, surfaceToLight))) > 0.98f)
+    {
+        lightUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+
+    std::array<XMVECTOR, 8> sceneCorners =
+    {
+        XMVectorSet(sceneMinValue.x, sceneMinValue.y, sceneMinValue.z, 1.0f),
+        XMVectorSet(sceneMinValue.x, sceneMinValue.y, sceneMaxValue.z, 1.0f),
+        XMVectorSet(sceneMinValue.x, sceneMaxValue.y, sceneMinValue.z, 1.0f),
+        XMVectorSet(sceneMinValue.x, sceneMaxValue.y, sceneMaxValue.z, 1.0f),
+        XMVectorSet(sceneMaxValue.x, sceneMinValue.y, sceneMinValue.z, 1.0f),
+        XMVectorSet(sceneMaxValue.x, sceneMinValue.y, sceneMaxValue.z, 1.0f),
+        XMVectorSet(sceneMaxValue.x, sceneMaxValue.y, sceneMinValue.z, 1.0f),
+        XMVectorSet(sceneMaxValue.x, sceneMaxValue.y, sceneMaxValue.z, 1.0f)
+    };
+
+    std::array<float, ShadowCascadeCount> cascadeSplits{};
+    float cascadeNear = nearClip;
+    const float tanHalfFovY = std::tan(fovY * 0.5f);
+    const float tanHalfFovX = tanHalfFovY * aspect;
+
+    const XMVECTOR sceneCenter = XMLoadFloat3(&sceneCenterValue);
+    const float staticLightDistance = dominantExtent * 3.2f + 420.0f;
+    const XMVECTOR staticLightPosition = sceneCenter + surfaceToLight * staticLightDistance;
+    const XMMATRIX staticLightView = XMMatrixLookAtLH(staticLightPosition, sceneCenter, lightUp);
+
+    XMFLOAT3 minSceneStaticLS(
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)(),
+        (std::numeric_limits<float>::max)());
+    XMFLOAT3 maxSceneStaticLS(
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)(),
+        -(std::numeric_limits<float>::max)());
+    for (const XMVECTOR& sceneCorner : sceneCorners)
+    {
+        XMFLOAT3 lightSpaceSceneCorner{};
+        XMStoreFloat3(&lightSpaceSceneCorner, XMVector3TransformCoord(sceneCorner, staticLightView));
+        minSceneStaticLS.x = (std::min)(minSceneStaticLS.x, lightSpaceSceneCorner.x);
+        minSceneStaticLS.y = (std::min)(minSceneStaticLS.y, lightSpaceSceneCorner.y);
+        minSceneStaticLS.z = (std::min)(minSceneStaticLS.z, lightSpaceSceneCorner.z);
+        maxSceneStaticLS.x = (std::max)(maxSceneStaticLS.x, lightSpaceSceneCorner.x);
+        maxSceneStaticLS.y = (std::max)(maxSceneStaticLS.y, lightSpaceSceneCorner.y);
+        maxSceneStaticLS.z = (std::max)(maxSceneStaticLS.z, lightSpaceSceneCorner.z);
+    }
+
+    for (UINT cascadeIndex = 0; cascadeIndex < ShadowCascadeCount; ++cascadeIndex)
+    {
+        const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(ShadowCascadeCount);
+        const float logSplit = nearClip * std::pow(farClip / nearClip, p);
+        const float uniformSplit = nearClip + (farClip - nearClip) * p;
+        const float cascadeFar = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+        cascadeSplits[cascadeIndex] = cascadeFar;
+
+        if (useStaticShadowCascades)
+        {
+            const float scale = 0.58f + 0.42f * p;
+            const float centerX = 0.5f * (minSceneStaticLS.x + maxSceneStaticLS.x);
+            const float centerY = 0.5f * (minSceneStaticLS.y + maxSceneStaticLS.y);
+            const float halfWidth = 0.5f * (maxSceneStaticLS.x - minSceneStaticLS.x) * scale + 28.0f;
+            const float halfHeight = 0.5f * (maxSceneStaticLS.y - minSceneStaticLS.y) * scale + 28.0f;
+            const float minZ = minSceneStaticLS.z - dominantExtent * 0.45f - 180.0f;
+            const float maxZ = maxSceneStaticLS.z + dominantExtent * 0.45f + 180.0f;
+
+            const float extentX = halfWidth * 2.0f;
+            const float extentY = halfHeight * 2.0f;
+            const float texelStepX = extentX / static_cast<float>(ShadowMapResolution);
+            const float texelStepY = extentY / static_cast<float>(ShadowMapResolution);
+            const float snappedCenterX = std::floor(centerX / texelStepX) * texelStepX;
+            const float snappedCenterY = std::floor(centerY / texelStepY) * texelStepY;
+
+            const XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+                snappedCenterX - halfWidth,
+                snappedCenterX + halfWidth,
+                snappedCenterY - halfHeight,
+                snappedCenterY + halfHeight,
+                minZ,
+                maxZ);
+
+            XMStoreFloat4x4(&cb.LightViewProj[cascadeIndex], XMMatrixTranspose(staticLightView * lightProj));
+            cascadeNear = cascadeFar;
+            continue;
+        }
+
+        const float cascadeNearBounds = (std::max)(nearClip, cascadeNear * 0.82f);
+        const float cascadeFarBounds = (std::min)(farClip, cascadeFar * 1.06f);
+        const float nearX = cascadeNearBounds * tanHalfFovX;
+        const float nearY = cascadeNearBounds * tanHalfFovY;
+        const float farX = cascadeFarBounds * tanHalfFovX;
+        const float farY = cascadeFarBounds * tanHalfFovY;
+
+        std::array<XMVECTOR, 8> frustumCornersVS =
+        {
+            XMVectorSet(-nearX,  nearY, cascadeNearBounds, 1.0f),
+            XMVectorSet( nearX,  nearY, cascadeNearBounds, 1.0f),
+            XMVectorSet( nearX, -nearY, cascadeNearBounds, 1.0f),
+            XMVectorSet(-nearX, -nearY, cascadeNearBounds, 1.0f),
+            XMVectorSet(-farX,   farY,  cascadeFarBounds,  1.0f),
+            XMVectorSet( farX,   farY,  cascadeFarBounds,  1.0f),
+            XMVectorSet( farX,  -farY,  cascadeFarBounds,  1.0f),
+            XMVectorSet(-farX,  -farY,  cascadeFarBounds,  1.0f)
+        };
+
+        XMVECTOR cascadeCenter = XMVectorZero();
+        std::array<XMVECTOR, 8> frustumCornersWS{};
+        for (UINT cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+        {
+            frustumCornersWS[cornerIndex] = XMVector3TransformCoord(frustumCornersVS[cornerIndex], invCameraView);
+            cascadeCenter += frustumCornersWS[cornerIndex];
+        }
+        cascadeCenter /= 8.0f;
+
+        const float lightDistance = dominantExtent * 2.8f + cascadeFar * 0.65f + 250.0f;
+        const XMVECTOR lightPosition = cascadeCenter + surfaceToLight * lightDistance;
+        const XMMATRIX lightView = XMMatrixLookAtLH(lightPosition, cascadeCenter, lightUp);
+
+        XMFLOAT3 minSceneLS(
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)());
+        XMFLOAT3 maxSceneLS(
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)());
+        for (const XMVECTOR& sceneCorner : sceneCorners)
+        {
+            XMFLOAT3 lightSpaceSceneCorner{};
+            XMStoreFloat3(&lightSpaceSceneCorner, XMVector3TransformCoord(sceneCorner, lightView));
+            minSceneLS.x = (std::min)(minSceneLS.x, lightSpaceSceneCorner.x);
+            minSceneLS.y = (std::min)(minSceneLS.y, lightSpaceSceneCorner.y);
+            minSceneLS.z = (std::min)(minSceneLS.z, lightSpaceSceneCorner.z);
+            maxSceneLS.x = (std::max)(maxSceneLS.x, lightSpaceSceneCorner.x);
+            maxSceneLS.y = (std::max)(maxSceneLS.y, lightSpaceSceneCorner.y);
+            maxSceneLS.z = (std::max)(maxSceneLS.z, lightSpaceSceneCorner.z);
+        }
+
+        XMFLOAT3 minCascadeLS(
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)());
+        XMFLOAT3 maxCascadeLS(
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)());
+
+        for (const XMVECTOR& corner : frustumCornersWS)
+        {
+            XMFLOAT3 lightSpaceCorner{};
+            XMStoreFloat3(&lightSpaceCorner, XMVector3TransformCoord(corner, lightView));
+            minCascadeLS.x = (std::min)(minCascadeLS.x, lightSpaceCorner.x);
+            minCascadeLS.y = (std::min)(minCascadeLS.y, lightSpaceCorner.y);
+            minCascadeLS.z = (std::min)(minCascadeLS.z, lightSpaceCorner.z);
+            maxCascadeLS.x = (std::max)(maxCascadeLS.x, lightSpaceCorner.x);
+            maxCascadeLS.y = (std::max)(maxCascadeLS.y, lightSpaceCorner.y);
+            maxCascadeLS.z = (std::max)(maxCascadeLS.z, lightSpaceCorner.z);
+        }
+
+        const float paddingXY = 24.0f + dominantExtent * 0.018f + (1.0f - p) * 26.0f;
+        const float minX = minCascadeLS.x - paddingXY;
+        const float maxX = maxCascadeLS.x + paddingXY;
+        const float minY = minCascadeLS.y - paddingXY;
+        const float maxY = maxCascadeLS.y + paddingXY;
+        const float minZ = minSceneLS.z - dominantExtent * 0.40f - 220.0f;
+        const float maxZ = maxSceneLS.z + dominantExtent * 0.40f + 220.0f;
+
+        const float extentX = maxX - minX;
+        const float extentY = maxY - minY;
+        const float texelStepX = extentX / static_cast<float>(ShadowMapResolution);
+        const float texelStepY = extentY / static_cast<float>(ShadowMapResolution);
+        const float centerX = std::floor((0.5f * (minX + maxX)) / texelStepX) * texelStepX;
+        const float centerY = std::floor((0.5f * (minY + maxY)) / texelStepY) * texelStepY;
+        const float halfWidth = 0.5f * extentX;
+        const float halfHeight = 0.5f * extentY;
+
+        const XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+            centerX - halfWidth,
+            centerX + halfWidth,
+            centerY - halfHeight,
+            centerY + halfHeight,
+            minZ,
+            maxZ);
+
+        XMStoreFloat4x4(&cb.LightViewProj[cascadeIndex], XMMatrixTranspose(lightView * lightProj));
+        cascadeNear = cascadeFar;
+    }
+
+    cb.CascadeSplits = XMFLOAT4(
+        cascadeSplits[0],
+        cascadeSplits[1],
+        cascadeSplits[2],
+        cascadeSplits[3]);
+    cb.ShadowParams = XMFLOAT4(
+        useStaticShadowCascades ? 1.0f : 0.0f,
+        1.0f / static_cast<float>(ShadowMapResolution),
+        0.00055f,
+        0.0035f);
 }
 
 void RenderingSystem::UpdateWaterConstants()

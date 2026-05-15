@@ -176,6 +176,7 @@ bool D3D12Context::LoadScene(Scene scene)
     m_textureUploads.clear();
     m_submeshes.clear();
     m_lodMeshes.clear();
+    m_sceneMeshes.clear();
     m_materialDiffusePaths.clear();
     m_materialToSrv.clear();
     m_sceneObjects.clear();
@@ -340,6 +341,10 @@ bool D3D12Context::LoadScene(Scene scene)
             m_baseColorSrvIndex = m_lodMeshes.front().DiffuseSrvIndex;
             m_normalMapSrvIndex = m_lodMeshes.front().NormalSrvIndex;
         }
+    }
+    else
+    {
+        m_sceneMeshes.push_back(CaptureCurrentMesh());
     }
     BuildSceneObjects();
     BuildOctree();
@@ -583,10 +588,12 @@ void D3D12Context::BuildSceneObjects()
         object.BoundsLocal = localBounds;
         object.BoundsWorld = localBounds;
         object.DiffuseSrvIndex = UINT_MAX;
+        object.MeshIndex = 0;
         object.Visible = true;
         m_sceneObjects.push_back(object);
         m_sceneBoundsMin = localBounds.Min;
         m_sceneBoundsMax = localBounds.Max;
+
         return;
     }
 
@@ -624,6 +631,7 @@ void D3D12Context::BuildSceneObjects()
             object.BoundsLocal = localBounds;
             object.BoundsWorld = TransformBoundingBox(localBounds, object.World);
             object.DiffuseSrvIndex = UINT_MAX;
+            object.MeshIndex = 0;
             object.Visible = true;
 
             sceneMin.x = (std::min)(sceneMin.x, object.BoundsWorld.Min.x);
@@ -1026,11 +1034,6 @@ UINT D3D12Context::SelectCrowdLodIndex(const SceneObject& object) const
 
 void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex)
 {
-    if (m_cbMappedData == nullptr)
-    {
-        return;
-    }
-
     XMVECTOR cameraPos = XMLoadFloat3(&m_cameraPos);
     XMVECTOR cameraTarget = XMLoadFloat3(&m_cameraTarget);
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
@@ -1039,12 +1042,33 @@ void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UIN
 
     XMMATRIX proj =
         XMMatrixPerspectiveFovLH(
-            XM_PIDIV4,
-            (float)m_width / (float)m_height,
-            1.0f,
-            20000.0f);
+        XM_PIDIV4,
+        (float)m_width / (float)m_height,
+        1.0f,
+        20000.0f);
+
+    XMFLOAT4X4 viewFloat{};
+    XMFLOAT4X4 projFloat{};
+    XMStoreFloat4x4(&viewFloat, view);
+    XMStoreFloat4x4(&projFloat, proj);
+    UpdateCBWithMatrices(worldMatrix, viewFloat, projFloat, objectIndex, lodIndex);
+}
+
+void D3D12Context::UpdateCBWithMatrices(
+    const XMFLOAT4X4& worldMatrix,
+    const XMFLOAT4X4& viewMatrix,
+    const XMFLOAT4X4& projMatrix,
+    UINT objectIndex,
+    UINT lodIndex)
+{
+    if (m_cbMappedData == nullptr)
+    {
+        return;
+    }
 
     const XMMATRIX world = XMLoadFloat4x4(&worldMatrix);
+    const XMMATRIX view = XMLoadFloat4x4(&viewMatrix);
+    const XMMATRIX proj = XMLoadFloat4x4(&projMatrix);
     XMStoreFloat4x4(&m_cbData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&m_cbData.View, XMMatrixTranspose(view));
     XMStoreFloat4x4(&m_cbData.Proj, XMMatrixTranspose(proj));
@@ -1093,7 +1117,7 @@ void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UIN
         m_cbData.TessellationParams = XMFLOAT4(0.0f, 1.0f, 1.0f, 1.0f);
     }
 
-    const UINT safeIndex = (std::min)(objectIndex, MaxSceneObjects - 1);
+    const UINT safeIndex = (std::min)(objectIndex, MaxSceneConstantBufferSlots - 1);
     std::memcpy(
         m_cbMappedData + size_t(safeIndex) * size_t(m_constantBufferStride),
         &m_cbData,
@@ -2344,7 +2368,7 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
 bool D3D12Context::CreateConstantBuffer()
 {
     m_constantBufferStride = (sizeof(PerObjectCB) + 255) & ~255u;
-    const UINT64 cbSize = UINT64(m_constantBufferStride) * UINT64(MaxSceneObjects);
+    const UINT64 cbSize = UINT64(m_constantBufferStride) * UINT64(MaxSceneConstantBufferSlots);
 
     D3D12_HEAP_PROPERTIES upload{};
     upload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -2512,14 +2536,98 @@ void D3D12Context::DrawSceneGeometry(
         }
         else
         {
-            const MeshData mesh = CaptureCurrentMesh();
+            const MeshData& mesh = (object.MeshIndex < m_sceneMeshes.size())
+                ? m_sceneMeshes[object.MeshIndex]
+                : CaptureCurrentMesh();
             UpdateCB(object.World, objectIndex, 0);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
+            const UINT normalSrvIndex = (mesh.NormalSrvIndex == UINT_MAX) ? m_normalMapSrvIndex : mesh.NormalSrvIndex;
             D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
-            normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
+            normalMapHandle.ptr += SIZE_T(normalSrvIndex) * SIZE_T(m_srvDescriptorSize);
             commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
             bindMesh(mesh);
             drawSubmeshes(mesh, object.DiffuseSrvIndex);
+        }
+    }
+}
+
+void D3D12Context::DrawSceneShadowGeometry(
+    ID3D12GraphicsCommandList* commandList,
+    UINT displacementRootParameterIndex,
+    const XMFLOAT4X4& viewMatrix,
+    const XMFLOAT4X4& projMatrix)
+{
+    if (commandList == nullptr)
+    {
+        return;
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+
+    if (displacementRootParameterIndex != UINT_MAX)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE displacementHandle = baseGpu;
+        displacementHandle.ptr += SIZE_T(m_displacementSrvIndex) * SIZE_T(m_srvDescriptorSize);
+        commandList->SetGraphicsRootDescriptorTable(displacementRootParameterIndex, displacementHandle);
+    }
+
+    const auto bindMesh = [&](const MeshData& mesh)
+    {
+        commandList->IASetVertexBuffers(0, 1, &mesh.VbView);
+        commandList->IASetIndexBuffer(&mesh.IbView);
+    };
+
+    const auto drawMesh = [&](const MeshData& mesh)
+    {
+        if (!mesh.Submeshes.empty())
+        {
+            for (const auto& sm : mesh.Submeshes)
+            {
+                commandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
+            }
+        }
+        else
+        {
+            commandList->DrawIndexedInstanced(mesh.IndexCount, 1, 0, 0, 0);
+        }
+    };
+
+    if (m_sceneObjects.empty())
+    {
+        static const XMFLOAT4X4 identity = MakeIdentityMatrix();
+        UpdateCBWithMatrices(identity, viewMatrix, projMatrix, ShadowPassCBOffset, 0);
+        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(ShadowPassCBOffset));
+        const MeshData mesh = CaptureCurrentMesh();
+        bindMesh(mesh);
+        drawMesh(mesh);
+        return;
+    }
+
+    for (UINT objectIndex = 0; objectIndex < static_cast<UINT>(m_sceneObjects.size()); ++objectIndex)
+    {
+        const SceneObject& object = m_sceneObjects[objectIndex];
+
+        if (m_currentScene == Scene::ChickenField && !m_lodMeshes.empty())
+        {
+            const UINT lodIndex = SelectCrowdLodIndex(object);
+            const MeshData& mesh = m_lodMeshes[lodIndex];
+            const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
+            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, lodIndex);
+            commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
+            bindMesh(mesh);
+            drawMesh(mesh);
+        }
+        else
+        {
+            const MeshData& mesh = (object.MeshIndex < m_sceneMeshes.size())
+                ? m_sceneMeshes[object.MeshIndex]
+                : CaptureCurrentMesh();
+            const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
+            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, 0);
+            commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
+            bindMesh(mesh);
+            drawMesh(mesh);
         }
     }
 }
@@ -2546,7 +2654,7 @@ ID3D12RootSignature* D3D12Context::GetSceneRootSignature() const
 
 D3D12_GPU_VIRTUAL_ADDRESS D3D12Context::GetSceneConstantBufferAddress(UINT objectIndex) const
 {
-    const UINT safeIndex = (std::min)(objectIndex, MaxSceneObjects - 1);
+    const UINT safeIndex = (std::min)(objectIndex, MaxSceneConstantBufferSlots - 1);
     return m_constantBuffer->GetGPUVirtualAddress() + UINT64(safeIndex) * UINT64(m_constantBufferStride);
 }
 

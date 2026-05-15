@@ -35,6 +35,7 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(Slot slot) const;
     D3D12_GPU_DESCRIPTOR_HANDLE GetSRVGPU(Slot slot) const;
     DXGI_FORMAT GetFormat(Slot slot) const;
+    ID3D12Resource* GetResource(Slot slot) const;
 
     UINT GetWidth() const;
     UINT GetHeight() const;

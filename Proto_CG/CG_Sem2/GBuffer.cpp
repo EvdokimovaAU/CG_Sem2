@@ -151,6 +151,11 @@ DXGI_FORMAT GBuffer::GetFormat(Slot slot) const
     return kFormats[static_cast<UINT>(slot)];
 }
 
+ID3D12Resource* GBuffer::GetResource(Slot slot) const
+{
+    return m_targets[static_cast<UINT>(slot)].Get();
+}
+
 UINT GBuffer::GetWidth() const
 {
     return m_width;
