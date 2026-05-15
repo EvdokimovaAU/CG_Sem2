@@ -3176,7 +3176,9 @@ void RenderingSystem::UpdateLightingConstants()
 
 void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
 {
-    const bool useStaticShadowCascades = (m_context.GetCurrentScene() != Scene::Sponza);
+    // Keep the directional shadow anchored to the scene instead of the camera.
+    // Camera-dependent cascades were causing the shadowed region to shift with view changes.
+    const bool useStaticShadowCascades = true;
     const XMFLOAT3 sceneCenterValue = m_context.GetSceneCenter();
     const XMFLOAT3 sceneMinValue = m_context.GetSceneBoundsMin();
     const XMFLOAT3 sceneMaxValue = m_context.GetSceneBoundsMax();
@@ -3259,13 +3261,12 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
 
         if (useStaticShadowCascades)
         {
-            const float scale = 0.58f + 0.42f * p;
             const float centerX = 0.5f * (minSceneStaticLS.x + maxSceneStaticLS.x);
             const float centerY = 0.5f * (minSceneStaticLS.y + maxSceneStaticLS.y);
-            const float halfWidth = 0.5f * (maxSceneStaticLS.x - minSceneStaticLS.x) * scale + 28.0f;
-            const float halfHeight = 0.5f * (maxSceneStaticLS.y - minSceneStaticLS.y) * scale + 28.0f;
-            const float minZ = minSceneStaticLS.z - dominantExtent * 0.45f - 180.0f;
-            const float maxZ = maxSceneStaticLS.z + dominantExtent * 0.45f + 180.0f;
+            const float halfWidth = 0.5f * (maxSceneStaticLS.x - minSceneStaticLS.x) + dominantExtent * 0.12f + 56.0f;
+            const float halfHeight = 0.5f * (maxSceneStaticLS.y - minSceneStaticLS.y) + dominantExtent * 0.12f + 56.0f;
+            const float minZ = minSceneStaticLS.z - dominantExtent * 0.60f - 260.0f;
+            const float maxZ = maxSceneStaticLS.z + dominantExtent * 0.60f + 260.0f;
 
             const float extentX = halfWidth * 2.0f;
             const float extentY = halfHeight * 2.0f;
@@ -3397,8 +3398,8 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
     cb.ShadowParams = XMFLOAT4(
         useStaticShadowCascades ? 1.0f : 0.0f,
         1.0f / static_cast<float>(ShadowMapResolution),
-        0.00055f,
-        0.0035f);
+        useStaticShadowCascades ? 0.00028f : 0.00055f,
+        useStaticShadowCascades ? 0.0f : 0.0035f);
 }
 
 void RenderingSystem::UpdateWaterConstants()

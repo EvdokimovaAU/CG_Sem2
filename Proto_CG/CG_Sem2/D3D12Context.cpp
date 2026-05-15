@@ -1101,7 +1101,9 @@ void D3D12Context::UpdateCBWithMatrices(
     }
 
     float normalMapStrength = 1.0f;
-    if (m_currentScene == Scene::Sponza)
+    if (m_currentScene == Scene::Sponza ||
+        m_currentScene == Scene::HighPlane ||
+        m_currentScene == Scene::HighPolyDisplacement)
     {
         normalMapStrength = 0.0f;
     }
@@ -1109,8 +1111,8 @@ void D3D12Context::UpdateCBWithMatrices(
     m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, normalMapStrength, 0.0f);
     if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
     {
-        // More visible displacement with a lower tessellation budget.
-        m_cbData.TessellationParams = XMFLOAT4(0.48f, 10.0f, 2.0f, 520.0f);
+        // Keep displaced geometry stable so shadow receivers do not change with camera distance.
+        m_cbData.TessellationParams = XMFLOAT4(0.48f, 10.0f, 10.0f, 520.0f);
     }
     else
     {

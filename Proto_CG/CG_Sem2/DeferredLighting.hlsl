@@ -78,7 +78,9 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
 {
     const bool useStaticShadowSelection = ShadowParams.x > 0.5f;
-    const float bias = ShadowParams.z + (1.0f - saturate(dot(normal, lightDir))) * ShadowParams.w;
+    const float bias = useStaticShadowSelection
+        ? ShadowParams.z
+        : (ShadowParams.z + (1.0f - saturate(dot(normal, lightDir))) * ShadowParams.w);
     const float texelSize = ShadowParams.y;
     const float viewDepth = mul(float4(worldPos, 1.0f), View).z;
     uint startCascadeIndex = 0;
@@ -92,7 +94,7 @@ float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
     bool foundCascade = false;
 
     [unroll]
-    for (uint cascadeIndex = (useStaticShadowSelection ? 0u : startCascadeIndex); cascadeIndex < 4; ++cascadeIndex)
+    for (uint cascadeIndex = (useStaticShadowSelection ? 0u : startCascadeIndex); cascadeIndex < 4u; ++cascadeIndex)
     {
         float4 lightClip = mul(float4(worldPos, 1.0f), LightViewProj[cascadeIndex]);
         float3 lightNdc = lightClip.xyz / max(lightClip.w, 0.0001f);
