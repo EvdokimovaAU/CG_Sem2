@@ -23,8 +23,10 @@ Texture2D<float4> GAlbedoSpec : register(t0);
 Texture2D<float4> GWorldPos : register(t1);
 Texture2D<float4> GNormal : register(t2);
 Texture2D<float4> GDepth : register(t3);
-Texture2DArray<float> ShadowMap : register(t4);
+Texture2DArray<float> ShadowMap : register(t4); // массив каскадов
+Texture2D<float4> ShadowMaskTex : register(t5);
 SamplerState ShadowSampler : register(s0);
+SamplerState ShadowMaskSampler : register(s1);
 
 struct PSInput
 {
@@ -254,7 +256,13 @@ float4 PSMain(PSInput input) : SV_TARGET
         lit += EvaluateLight(albedo, roughness, normal, V, L, radiance);
     }
 
+    const float shadowAmount = saturate(1.0f - directionalShadow);
+    const float2 maskUv = worldPos.xz * float2(0.01f, 0.03f);
+    const float maskSample = ShadowMaskTex.Sample(ShadowMaskSampler, maskUv).a;
+    const float shadowPattern = shadowAmount * saturate(maskSample * 1.35f);
+
     lit *= lerp(0.28f, 1.0f, directionalShadow);
+    lit *= 1.0f - shadowPattern * 0.65f;
 
     float3 litSRGB = pow(saturate(lit), 1.0f / 2.2f);
     return float4(litSRGB, 1.0f);

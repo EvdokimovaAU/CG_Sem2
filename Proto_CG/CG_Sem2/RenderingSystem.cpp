@@ -1,4 +1,4 @@
-﻿#include "RenderingSystem.h"
+#include "RenderingSystem.h"
 
 #include <array>
 #include <cmath>
@@ -29,7 +29,9 @@ namespace
     constexpr UINT kFireUavBuffer0 = 2;
     constexpr UINT kFireUavBuffer1 = 3;
     constexpr UINT kFireThreadGroupSize = 64;
-    constexpr UINT kLightingSrvCount = GBuffer::TargetCount + 1;
+    constexpr UINT kLightingShadowMapSrv = GBuffer::TargetCount;
+    constexpr UINT kLightingShadowMaskSrv = GBuffer::TargetCount + 1;
+    constexpr UINT kLightingSrvCount = GBuffer::TargetCount + 2;
 
     struct DebugOverlayConstants
     {
@@ -129,7 +131,7 @@ bool RenderingSystem::LoadScene(Scene scene)
     m_previousFireTime = 0.0f;
     return m_context.LoadScene(scene);
 }
-// корректное завершение рендера и очистка памяти
+
 void RenderingSystem::Shutdown()
 {
     if (m_deferredLightCBMappedData != nullptr && m_deferredLightConstantBuffer != nullptr)
@@ -170,6 +172,8 @@ void RenderingSystem::Shutdown()
     m_fireRenderConstantBuffer.Reset();
     m_waterConstantBuffer.Reset();
     m_shadowMap.Reset();
+    m_shadowMaskTexture.Reset();
+    m_shadowMaskTextureUpload.Reset();
     m_deferredGeometryPSO.Reset();
     m_shadowPSO.Reset();
     m_deferredLightingPSO.Reset();
@@ -359,6 +363,7 @@ void RenderingSystem::RenderDeferredFrame()
     m_context.EndFrame();
 }
 
+// рендеринг с точки зрения света
 void RenderingSystem::RenderShadowStage()
 {
     if (!m_shadowPSO || !m_shadowRootSignature || !m_shadowMap || !m_shadowDsvHeap)
@@ -424,7 +429,7 @@ void RenderingSystem::RenderShadowStage()
         m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
 }
-// свойства поверхности для GBuffer
+
 void RenderingSystem::RenderOpaqueStage()
 {
     ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
@@ -451,6 +456,7 @@ void RenderingSystem::RenderOpaqueStage()
     m_gbuffer.EndGeometryPass(commandList);
 }
 
+
 // рачсет освещения
 void RenderingSystem::RenderLightingStage()
 {
@@ -460,6 +466,40 @@ void RenderingSystem::RenderLightingStage()
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
 
     UpdateLightingConstants();
+
+    if (!m_shadowMaskUploaded && m_shadowMaskTexture != nullptr && m_shadowMaskTextureUpload != nullptr)
+    {
+        const D3D12_RESOURCE_DESC textureDesc = m_shadowMaskTexture->GetDesc();
+        const UINT rowPitch = (static_cast<UINT>(textureDesc.Width) * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+            ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = m_shadowMaskTexture.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_shadowMaskTextureUpload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = 0;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width = static_cast<UINT>(textureDesc.Width);
+        src.PlacedFootprint.Footprint.Height = textureDesc.Height;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = rowPitch;
+
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER textureBarrier{};
+        textureBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        textureBarrier.Transition.pResource = m_shadowMaskTexture.Get();
+        textureBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        textureBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        textureBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        commandList->ResourceBarrier(1, &textureBarrier);
+
+        m_shadowMaskUploaded = true;
+    }
 
     commandList->RSSetViewports(1, &vp);
     commandList->RSSetScissorRects(1, &sc);
@@ -507,11 +547,11 @@ void RenderingSystem::RenderTransparentStage()
     commandList->DrawInstanced(6, 1, 0, 0);
 }
 
-// инициализация Deferred Resources
 bool RenderingSystem::InitializeDeferredResources()
 {
     return CompileDeferredShaders() &&
         CreateShadowResources() &&
+        CreateShadowMaskTexture() &&
         CreateShadowRootSignature() &&
         CreateShadowPipeline() &&
         CreateLightingSrvHeap() &&
@@ -905,6 +945,7 @@ bool RenderingSystem::CompileDeferredShaders()
     return SUCCEEDED(hr);
 }
 
+// карта теней
 bool RenderingSystem::CreateShadowResources()
 {
     D3D12_HEAP_PROPERTIES defaultHeap{};
@@ -999,8 +1040,122 @@ bool RenderingSystem::CreateLightingSrvHeap()
     shadowSrvDesc.Texture2DArray.ArraySize = ShadowCascadeCount;
 
     D3D12_CPU_DESCRIPTOR_HANDLE shadowHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
-    shadowHandle.ptr += SIZE_T(GBuffer::TargetCount) * SIZE_T(m_lightingSrvDescriptorSize);
+    shadowHandle.ptr += SIZE_T(kLightingShadowMapSrv) * SIZE_T(m_lightingSrvDescriptorSize);
     m_context.GetDevice()->CreateShaderResourceView(m_shadowMap.Get(), &shadowSrvDesc, shadowHandle);
+
+    if (m_shadowMaskTexture != nullptr)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC maskSrvDesc{};
+        maskSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        maskSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        maskSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        maskSrvDesc.Texture2D.MipLevels = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE maskHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        maskHandle.ptr += SIZE_T(kLightingShadowMaskSrv) * SIZE_T(m_lightingSrvDescriptorSize);
+        m_context.GetDevice()->CreateShaderResourceView(m_shadowMaskTexture.Get(), &maskSrvDesc, maskHandle);
+    }
+
+    return true;
+}
+
+bool RenderingSystem::CreateShadowMaskTexture()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    wchar_t texturePathW[MAX_PATH];
+    if (!ResolveAssetPath(L"models\\textures\\design.png", texturePathW, MAX_PATH))
+    {
+        return false;
+    }
+
+    char texturePathA[MAX_PATH];
+    WideCharToMultiByte(CP_ACP, 0, texturePathW, -1, texturePathA, MAX_PATH, nullptr, nullptr);
+
+    int width = 0;
+    int height = 0;
+    int comp = 0;
+    stbi_uc* pixels = stbi_load(texturePathA, &width, &height, &comp, 4);
+    if (pixels == nullptr || width <= 0 || height <= 0)
+    {
+        return false;
+    }
+
+    const UINT srcRowPitch = static_cast<UINT>(width) * 4u;
+    const UINT alignedRowPitch =
+        (srcRowPitch + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+        ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+    const UINT64 uploadSize = UINT64(alignedRowPitch) * UINT64(height);
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC textureDesc{};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = static_cast<UINT>(width);
+    textureDesc.Height = static_cast<UINT>(height);
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = 1;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_shadowMaskTexture))))
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_shadowMaskTextureUpload))))
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    void* mappedData = nullptr;
+    if (FAILED(m_shadowMaskTextureUpload->Map(0, nullptr, &mappedData)) || mappedData == nullptr)
+    {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    auto* dstBytes = static_cast<stbi_uc*>(mappedData);
+    for (int y = 0; y < height; ++y)
+    {
+        memcpy(dstBytes + SIZE_T(y) * SIZE_T(alignedRowPitch), pixels + SIZE_T(y) * SIZE_T(srcRowPitch), srcRowPitch);
+    }
+    m_shadowMaskTextureUpload->Unmap(0, nullptr);
+    stbi_image_free(pixels);
+
+    m_shadowMaskUploaded = false;
     return true;
 }
 
@@ -1122,11 +1277,22 @@ bool RenderingSystem::CreateDeferredLightingRootSignature()
     shadowSampler.ShaderRegister = 0;
     shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    D3D12_STATIC_SAMPLER_DESC maskSampler{};
+    maskSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    maskSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    maskSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    maskSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    maskSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    maskSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    maskSampler.ShaderRegister = 1;
+    maskSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     D3D12_ROOT_SIGNATURE_DESC desc{};
     desc.NumParameters = 2;
     desc.pParameters = rootParams;
-    desc.NumStaticSamplers = 1;
-    desc.pStaticSamplers = &shadowSampler;
+    D3D12_STATIC_SAMPLER_DESC samplers[] = { shadowSampler, maskSampler };
+    desc.NumStaticSamplers = _countof(samplers);
+    desc.pStaticSamplers = samplers;
     desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serialized;
@@ -1438,7 +1604,7 @@ bool RenderingSystem::CreateWaterRootSignature()
         IID_PPV_ARGS(&m_waterRootSignature)));
 }
 
-//сцена рисуется не в один цветовой буфер, а сразу в несколько текстур GBuffer
+
 bool RenderingSystem::CreateDeferredGeometryPipeline()
 {
     D3D12_INPUT_ELEMENT_DESC layout[] =
@@ -3073,6 +3239,7 @@ bool RenderingSystem::CreateWaterConstantBuffer()
     return true;
 }
 
+
 void RenderingSystem::UpdateLightingConstants()
 {
     if (m_deferredLightCBMappedData == nullptr)
@@ -3173,11 +3340,9 @@ void RenderingSystem::UpdateLightingConstants()
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
 }
-
+//  положение и размер каждого каскада
 void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
 {
-    // Keep the directional shadow anchored to the scene instead of the camera.
-    // Camera-dependent cascades were causing the shadowed region to shift with view changes.
     const bool useStaticShadowCascades = true;
     const XMFLOAT3 sceneCenterValue = m_context.GetSceneCenter();
     const XMFLOAT3 sceneMinValue = m_context.GetSceneBoundsMin();
@@ -3253,10 +3418,10 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
 
     for (UINT cascadeIndex = 0; cascadeIndex < ShadowCascadeCount; ++cascadeIndex)
     {
-        const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(ShadowCascadeCount);
+        const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(ShadowCascadeCount); // доля глубины
         const float logSplit = nearClip * std::pow(farClip / nearClip, p);
         const float uniformSplit = nearClip + (farClip - nearClip) * p;
-        const float cascadeFar = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+        const float cascadeFar = lambda * logSplit + (1.0f - lambda) * uniformSplit; // итоговая граница каскада
         cascadeSplits[cascadeIndex] = cascadeFar;
 
         if (useStaticShadowCascades)
@@ -3378,6 +3543,7 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
         const float halfWidth = 0.5f * extentX;
         const float halfHeight = 0.5f * extentY;
 
+        // ортографическая проекция света
         const XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
             centerX - halfWidth,
             centerX + halfWidth,
@@ -3385,7 +3551,7 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
             centerY + halfHeight,
             minZ,
             maxZ);
-
+        // итоговая матрица
         XMStoreFloat4x4(&cb.LightViewProj[cascadeIndex], XMMatrixTranspose(lightView * lightProj));
         cascadeNear = cascadeFar;
     }
@@ -3401,6 +3567,7 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
         useStaticShadowCascades ? 0.00028f : 0.00055f,
         useStaticShadowCascades ? 0.0f : 0.0035f);
 }
+
 
 void RenderingSystem::UpdateWaterConstants()
 {

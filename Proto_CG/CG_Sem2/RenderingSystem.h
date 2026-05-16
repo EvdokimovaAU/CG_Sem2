@@ -68,6 +68,7 @@ private:
     bool CreateShadowRootSignature();
     bool CreateShadowPipeline();
     bool CreateLightingSrvHeap();
+    bool CreateShadowMaskTexture();
     bool CreateDeferredLightingRootSignature();
     bool CreateDeferredGeometryPipeline();
     bool CreateDeferredLightingPipeline();
@@ -105,7 +106,7 @@ private:
 private:
     static constexpr UINT MaxPointLights = 6;
     static constexpr UINT MaxSpotLights = 4;
-    static constexpr UINT ShadowCascadeCount = 4;
+    static constexpr UINT ShadowCascadeCount = 4; // каскады
     static constexpr UINT ShadowMapResolution = 2048;
     static constexpr UINT MaxDustParticles = 512;
     static constexpr UINT SphereDustParticles = 192;
@@ -123,10 +124,10 @@ private:
         DirectX::XMFLOAT4 SpotLightDirectionCosine[MaxSpotLights];
         DirectX::XMFLOAT4 SpotLightColorIntensity[MaxSpotLights];
         DirectX::XMFLOAT4 ScreenSize;
-        DirectX::XMFLOAT4 CascadeSplits;
+        DirectX::XMFLOAT4 CascadeSplits; // границы каскадов по глубине камеры
         DirectX::XMFLOAT4 ShadowParams;
         DirectX::XMFLOAT4X4 View;
-        DirectX::XMFLOAT4X4 LightViewProj[ShadowCascadeCount];
+        DirectX::XMFLOAT4X4 LightViewProj[ShadowCascadeCount]; // сами матрицы каскадов
         DirectX::XMFLOAT4X4 InvView;
         DirectX::XMFLOAT4X4 InvProj;
     };
@@ -232,6 +233,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_lightingSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMaskTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMaskTextureUpload;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_deferredLightConstantBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_particleSimulationConstantBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_particleRenderConstantBuffer;
@@ -261,6 +264,7 @@ private:
     UINT m_shadowDsvDescriptorSize = 0;
     UINT m_lightingSrvDescriptorSize = 0;
     D3D12_RESOURCE_STATES m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    bool m_shadowMaskUploaded = false;
     UINT m_particleSourceIndex = 0;
     UINT m_fireSourceIndex = 0;
     bool m_particleDataInitialized = false;

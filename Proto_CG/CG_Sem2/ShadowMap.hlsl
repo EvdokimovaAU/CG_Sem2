@@ -48,9 +48,6 @@ HSControlPoint VSMain(VSInput input)
 float ComputeTessFactor(float3 p0, float3 p1, float3 p2)
 {
     float maxTess = max(TessellationParams.y, 1.0f);
-    // Keep shadow-caster displacement stable regardless of camera distance.
-    // Using camera-dependent tessellation here causes the visible surface and
-    // shadow map to diverge as the camera moves closer or farther away.
     return maxTess;
 }
 
