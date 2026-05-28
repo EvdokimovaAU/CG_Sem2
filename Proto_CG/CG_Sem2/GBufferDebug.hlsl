@@ -21,7 +21,18 @@ struct PSInput
 PSInput VSMain(uint vertexId : SV_VertexID)
 {
     PSInput output;
-    float2 uv = float2((vertexId << 1) & 2, vertexId & 2);
+    static const float2 kQuadUV[6] =
+    {
+        float2(0.0f, 0.0f),
+        float2(1.0f, 0.0f),
+        float2(0.0f, 1.0f),
+        float2(0.0f, 1.0f),
+        float2(1.0f, 0.0f),
+        float2(1.0f, 1.0f)
+    };
+
+    float2 uv = kQuadUV[vertexId];
+
     output.Position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     output.UV = uv;
     return output;

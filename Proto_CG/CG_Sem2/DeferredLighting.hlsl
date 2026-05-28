@@ -19,6 +19,14 @@ cbuffer DeferredLightCB : register(b0)
     float4x4 InvProj;
 };
 
+// Debug modes for quick G-buffer validation:
+// 0 - normal lighting
+// 1 - albedo
+// 2 - world position
+// 3 - normal
+// 4 - depth
+#define POST_PROCESS_DEBUG_MODE 0
+
 Texture2D<float4> GAlbedoSpec : register(t0);
 Texture2D<float4> GWorldPos : register(t1);
 Texture2D<float4> GNormal : register(t2);
@@ -31,13 +39,26 @@ SamplerState ShadowMaskSampler : register(s1);
 struct PSInput
 {
     float4 Position : SV_POSITION;
+    float2 UV : TEXCOORD0;
 };
 
 PSInput VSMain(uint vertexId : SV_VertexID)
 {
     PSInput output;
-    float2 uv = float2((vertexId << 1) & 2, vertexId & 2);
+    static const float2 kQuadUV[6] =
+    {
+        float2(0.0f, 0.0f),
+        float2(1.0f, 0.0f),
+        float2(0.0f, 1.0f),
+        float2(0.0f, 1.0f),
+        float2(1.0f, 0.0f),
+        float2(1.0f, 1.0f)
+    };
+
+    float2 uv = kQuadUV[vertexId];
+
     output.Position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    output.UV = uv;
     return output;
 }
 
@@ -75,6 +96,20 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
+}
+
+float3 ApplyExposureToneMapping(float3 hdrColor, float exposure)
+{
+    return 1.0f.xxx - exp(-hdrColor * exposure);
+}
+
+float ComputeVignette(float2 uv, float strength, float roundness)
+{
+    float2 centeredUv = uv * 2.0f - 1.0f;
+    centeredUv.x *= lerp(1.0f, 1.12f, roundness);
+    const float radius = length(centeredUv);
+    const float vignette = 1.0f - smoothstep(0.45f, 1.05f - strength * 0.35f, radius);
+    return lerp(1.0f, vignette, strength);
 }
 
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
@@ -182,6 +217,7 @@ float3 EvaluateLight(
 float4 PSMain(PSInput input) : SV_TARGET
 {
     int2 pixelPos = int2(input.Position.xy);
+    float2 uv = saturate((float2(pixelPos) + 0.5f) * ScreenSize.zw);
 
     float4 albedoSpec = GAlbedoSpec.Load(int3(pixelPos, 0));
     float3 worldPos = GWorldPos.Load(int3(pixelPos, 0)).xyz;
@@ -197,10 +233,23 @@ float4 PSMain(PSInput input) : SV_TARGET
     float roughness = saturate(albedoSpec.a);
     float smoothness = 1.0f - roughness;
     float3 normal = normalize(normalEncoded * 2.0f - 1.0f);
+
+#if POST_PROCESS_DEBUG_MODE == 1
+    return float4(albedo, 1.0f);
+#elif POST_PROCESS_DEBUG_MODE == 2
+    return float4(frac(worldPos * 0.05f), 1.0f);
+#elif POST_PROCESS_DEBUG_MODE == 3
+    return float4(normal * 0.5f + 0.5f, 1.0f);
+#elif POST_PROCESS_DEBUG_MODE == 4
+    float depthVis = saturate(pow(depth, 0.35f));
+    return float4(depthVis, depthVis, depthVis, 1.0f);
+#endif
+
     float3 cameraPos = GetCameraPositionWS();
     float3 V = normalize(cameraPos - worldPos);
 
     float upFactor = saturate(normal.y * 0.5f + 0.5f);
+    const float sceneColorScale = AmbientColor.a;
     float3 skyAmbient = AmbientColor.rgb * lerp(0.72f, 1.18f, upFactor);
     float3 lit = skyAmbient * albedo * (1.0f - roughness * 0.18f);
     float3 ambientF0 = lerp(float3(0.026f, 0.026f, 0.026f), float3(0.045f, 0.045f, 0.045f), smoothness * 0.45f);
@@ -263,7 +312,18 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     lit *= lerp(0.28f, 1.0f, directionalShadow);
     lit *= 1.0f - shadowPattern * 0.65f;
+    lit *= sceneColorScale;
 
-    float3 litSRGB = pow(saturate(lit), 1.0f / 2.2f);
+    // Post-effect 1: exposure-based tone mapping from the presentation.
+    const float exposure = 2.4f;
+    float3 toneMapped = ApplyExposureToneMapping(max(lit, 0.0f.xxx), exposure);
+
+    // Post-effect 2: camera-style vignette from the presentation.
+    const float vignetteStrength = 0.88f;
+    const float vignetteRoundness = 1.0f;
+    const float vignette = ComputeVignette(uv, vignetteStrength, vignetteRoundness);
+    toneMapped *= vignette;
+
+    float3 litSRGB = pow(saturate(toneMapped), 1.0f / 2.2f);
     return float4(litSRGB, 1.0f);
 }

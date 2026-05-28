@@ -514,7 +514,7 @@ void RenderingSystem::RenderLightingStage()
     commandList->SetGraphicsRootDescriptorTable(0, m_lightingSrvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->SetGraphicsRootConstantBufferView(1, m_deferredLightConstantBuffer->GetGPUVirtualAddress());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    commandList->DrawInstanced(3, 1, 0, 0);
+    commandList->DrawInstanced(6, 1, 0, 0);
 }
 
 void RenderingSystem::RenderTransparentStage()
@@ -2376,7 +2376,7 @@ void RenderingSystem::RenderGBufferDebugOverlay()
             sizeof(DebugOverlayConstants) / sizeof(UINT),
             &constants,
             0);
-        commandList->DrawInstanced(3, 1, 0, 0);
+        commandList->DrawInstanced(6, 1, 0, 0);
     }
 }
 
@@ -3299,7 +3299,7 @@ void RenderingSystem::UpdateLightingConstants()
 
         cb.LightDirection = XMFLOAT4(0.88f, -1.0f, -0.34f, 0.0f);
         cb.LightColor = XMFLOAT4(1.00f, 0.95f, 0.88f, 3.40f);
-        cb.AmbientColor = XMFLOAT4(0.09f, 0.10f, 0.12f, 1.0f);
+        cb.AmbientColor = XMFLOAT4(0.09f, 0.10f, 0.12f, 0.72f);
         cb.LightCounts = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
 
         cb.PointLightPositionRange[0] = XMFLOAT4(
