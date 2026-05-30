@@ -19,12 +19,6 @@ cbuffer DeferredLightCB : register(b0)
     float4x4 InvProj;
 };
 
-// Debug modes for quick G-buffer validation:
-// 0 - normal lighting
-// 1 - albedo
-// 2 - world position
-// 3 - normal
-// 4 - depth
 #define POST_PROCESS_DEBUG_MODE 0
 
 Texture2D<float4> GAlbedoSpec : register(t0);
@@ -42,10 +36,10 @@ struct PSInput
     float2 UV : TEXCOORD0;
 };
 
-PSInput VSMain(uint vertexId : SV_VertexID)
+PSInput VSMain(uint vertexId : SV_VertexID) // full-sreen quad
 {
     PSInput output;
-    static const float2 kQuadUV[6] =
+    static const float2 kQuadUV[6] = // передаем вершинные в пискельный
     {
         float2(0.0f, 0.0f),
         float2(1.0f, 0.0f),
@@ -55,7 +49,7 @@ PSInput VSMain(uint vertexId : SV_VertexID)
         float2(1.0f, 1.0f)
     };
 
-    float2 uv = kQuadUV[vertexId];
+    float2 uv = kQuadUV[vertexId]; 
 
     output.Position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     output.UV = uv;
@@ -96,20 +90,6 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
-}
-
-float3 ApplyExposureToneMapping(float3 hdrColor, float exposure)
-{
-    return 1.0f.xxx - exp(-hdrColor * exposure);
-}
-
-float ComputeVignette(float2 uv, float strength, float roundness)
-{
-    float2 centeredUv = uv * 2.0f - 1.0f;
-    centeredUv.x *= lerp(1.0f, 1.12f, roundness);
-    const float radius = length(centeredUv);
-    const float vignette = 1.0f - smoothstep(0.45f, 1.05f - strength * 0.35f, radius);
-    return lerp(1.0f, vignette, strength);
 }
 
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
@@ -217,7 +197,6 @@ float3 EvaluateLight(
 float4 PSMain(PSInput input) : SV_TARGET
 {
     int2 pixelPos = int2(input.Position.xy);
-    float2 uv = saturate((float2(pixelPos) + 0.5f) * ScreenSize.zw);
 
     float4 albedoSpec = GAlbedoSpec.Load(int3(pixelPos, 0));
     float3 worldPos = GWorldPos.Load(int3(pixelPos, 0)).xyz;
@@ -314,16 +293,5 @@ float4 PSMain(PSInput input) : SV_TARGET
     lit *= 1.0f - shadowPattern * 0.65f;
     lit *= sceneColorScale;
 
-    // Post-effect 1: exposure-based tone mapping from the presentation.
-    const float exposure = 2.4f;
-    float3 toneMapped = ApplyExposureToneMapping(max(lit, 0.0f.xxx), exposure);
-
-    // Post-effect 2: camera-style vignette from the presentation.
-    const float vignetteStrength = 0.88f;
-    const float vignetteRoundness = 1.0f;
-    const float vignette = ComputeVignette(uv, vignetteStrength, vignetteRoundness);
-    toneMapped *= vignette;
-
-    float3 litSRGB = pow(saturate(toneMapped), 1.0f / 2.2f);
-    return float4(litSRGB, 1.0f);
+    return float4(max(lit, 0.0f.xxx), 1.0f);
 }

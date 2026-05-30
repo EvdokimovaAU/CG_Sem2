@@ -58,6 +58,7 @@ private:
     void RenderShadowStage();
     void RenderOpaqueStage();
     void RenderLightingStage();
+    void RenderPostProcessStage();
     void RenderGBufferDebugOverlay();
     void UpdateParticleSimulation();
     void RenderParticleStage();
@@ -67,11 +68,14 @@ private:
     bool CreateShadowResources();
     bool CreateShadowRootSignature();
     bool CreateShadowPipeline();
+    bool CreateHdrResources();
     bool CreateLightingSrvHeap();
     bool CreateShadowMaskTexture();
     bool CreateDeferredLightingRootSignature();
     bool CreateDeferredGeometryPipeline();
     bool CreateDeferredLightingPipeline();
+    bool CreatePostProcessRootSignature();
+    bool CreatePostProcessPipeline();
     bool CreateDebugOverlayRootSignature();
     bool CreateDebugOverlayPipeline();
     bool CreateParticleRootSignature();
@@ -196,6 +200,8 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredGeometryPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_deferredLightingPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_postProcessVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> m_postProcessPS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_shadowVS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_shadowHS;
     Microsoft::WRL::ComPtr<ID3DBlob> m_shadowDS;
@@ -215,6 +221,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> m_waterPS;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_shadowRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_deferredLightingRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_postProcessRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_debugOverlayRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_particleGraphicsRootSignature;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_particleComputeRootSignature;
@@ -224,6 +231,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_shadowPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_deferredLightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_postProcessPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_debugOverlayPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_particleGraphicsPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_particleComputePSO;
@@ -231,8 +239,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_fireComputePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waterPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_hdrColorBuffer;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_hdrRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_lightingSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postProcessSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMaskTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMaskTextureUpload;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_deferredLightConstantBuffer;
@@ -262,8 +273,10 @@ private:
     UINT m_particleDescriptorSize = 0;
     UINT m_fireDescriptorSize = 0;
     UINT m_shadowDsvDescriptorSize = 0;
+    UINT m_hdrRtvDescriptorSize = 0;
     UINT m_lightingSrvDescriptorSize = 0;
     D3D12_RESOURCE_STATES m_shadowMapState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES m_hdrColorBufferState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     bool m_shadowMaskUploaded = false;
     UINT m_particleSourceIndex = 0;
     UINT m_fireSourceIndex = 0;

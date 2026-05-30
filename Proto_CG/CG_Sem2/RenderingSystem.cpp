@@ -172,11 +172,13 @@ void RenderingSystem::Shutdown()
     m_fireRenderConstantBuffer.Reset();
     m_waterConstantBuffer.Reset();
     m_shadowMap.Reset();
+    m_hdrColorBuffer.Reset();
     m_shadowMaskTexture.Reset();
     m_shadowMaskTextureUpload.Reset();
     m_deferredGeometryPSO.Reset();
     m_shadowPSO.Reset();
     m_deferredLightingPSO.Reset();
+    m_postProcessPSO.Reset();
     m_debugOverlayPSO.Reset();
     m_particleGraphicsPSO.Reset();
     m_particleComputePSO.Reset();
@@ -184,6 +186,7 @@ void RenderingSystem::Shutdown()
     m_fireComputePSO.Reset();
     m_waterPSO.Reset();
     m_shadowRootSignature.Reset();
+    m_postProcessRootSignature.Reset();
     m_debugOverlayRootSignature.Reset();
     m_deferredLightingRootSignature.Reset();
     m_particleGraphicsRootSignature.Reset();
@@ -197,6 +200,8 @@ void RenderingSystem::Shutdown()
     m_deferredGeometryPS.Reset();
     m_deferredLightingVS.Reset();
     m_deferredLightingPS.Reset();
+    m_postProcessVS.Reset();
+    m_postProcessPS.Reset();
     m_shadowVS.Reset();
     m_shadowHS.Reset();
     m_shadowDS.Reset();
@@ -224,7 +229,9 @@ void RenderingSystem::Shutdown()
     m_particleTextureUpload.Reset();
     m_particleHeap.Reset();
     m_shadowDsvHeap.Reset();
+    m_hdrRtvHeap.Reset();
     m_lightingSrvHeap.Reset();
+    m_postProcessSrvHeap.Reset();
     m_fireBuffers[0].Reset();
     m_fireBuffers[1].Reset();
     m_fireCounterBuffers[0].Reset();
@@ -344,7 +351,7 @@ void RenderingSystem::RenderForwardFrame()
 
 void RenderingSystem::RenderDeferredFrame()
 {
-    if (!m_deferredGeometryPSO || !m_deferredLightingPSO)
+    if (!m_deferredGeometryPSO || !m_deferredLightingPSO || !m_postProcessPSO)
     {
         RenderForwardFrame();
         return;
@@ -356,6 +363,7 @@ void RenderingSystem::RenderDeferredFrame()
     RenderShadowStage();
     RenderOpaqueStage();
     RenderLightingStage();
+    RenderPostProcessStage();
     RenderFireStage();
     RenderParticleStage();
     RenderGBufferDebugOverlay();
@@ -463,7 +471,7 @@ void RenderingSystem::RenderLightingStage()
     ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
     D3D12_VIEWPORT vp = m_context.GetViewport();
     D3D12_RECT sc = m_context.GetScissorRect();
-    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
 
     UpdateLightingConstants();
 
@@ -501,10 +509,23 @@ void RenderingSystem::RenderLightingStage()
         m_shadowMaskUploaded = true;
     }
 
+    if (m_hdrColorBufferState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+    {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = m_hdrColorBuffer.Get();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = m_hdrColorBufferState;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        commandList->ResourceBarrier(1, &barrier);
+        m_hdrColorBufferState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+
     commandList->RSSetViewports(1, &vp);
     commandList->RSSetScissorRects(1, &sc);
-    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, nullptr);
-    commandList->ClearRenderTargetView(backBufferRtv, m_clearColor, 0, nullptr);
+    const float hdrClear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    commandList->OMSetRenderTargets(1, &hdrRtv, TRUE, nullptr);
+    commandList->ClearRenderTargetView(hdrRtv, hdrClear, 0, nullptr);
 
     commandList->SetPipelineState(m_deferredLightingPSO.Get());
     commandList->SetGraphicsRootSignature(m_deferredLightingRootSignature.Get());
@@ -513,6 +534,37 @@ void RenderingSystem::RenderLightingStage()
     commandList->SetDescriptorHeaps(1, heaps);
     commandList->SetGraphicsRootDescriptorTable(0, m_lightingSrvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->SetGraphicsRootConstantBufferView(1, m_deferredLightConstantBuffer->GetGPUVirtualAddress());
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->DrawInstanced(6, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_hdrColorBuffer.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = m_hdrColorBufferState;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+    m_hdrColorBufferState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void RenderingSystem::RenderPostProcessStage()
+{
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    D3D12_VIEWPORT vp = m_context.GetViewport();
+    D3D12_RECT sc = m_context.GetScissorRect();
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = m_context.GetCurrentBackBufferRTV();
+
+    commandList->RSSetViewports(1, &vp);
+    commandList->RSSetScissorRects(1, &sc);
+    commandList->OMSetRenderTargets(1, &backBufferRtv, TRUE, nullptr);
+    commandList->ClearRenderTargetView(backBufferRtv, m_clearColor, 0, nullptr);
+
+    commandList->SetPipelineState(m_postProcessPSO.Get());
+    commandList->SetGraphicsRootSignature(m_postProcessRootSignature.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_postProcessSrvHeap.Get() };
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootDescriptorTable(0, m_postProcessSrvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->DrawInstanced(6, 1, 0, 0);
 }
@@ -554,10 +606,13 @@ bool RenderingSystem::InitializeDeferredResources()
         CreateShadowMaskTexture() &&
         CreateShadowRootSignature() &&
         CreateShadowPipeline() &&
+        CreateHdrResources() &&
         CreateLightingSrvHeap() &&
         CreateDeferredLightingRootSignature() &&
         CreateDeferredGeometryPipeline() &&
         CreateDeferredLightingPipeline() &&
+        CreatePostProcessRootSignature() &&
+        CreatePostProcessPipeline() &&
         CreateDebugOverlayRootSignature() &&
         CreateDebugOverlayPipeline() &&
         CreateParticleRootSignature() &&
@@ -586,6 +641,7 @@ bool RenderingSystem::CompileDeferredShaders()
 
     wchar_t geometryPath[MAX_PATH];
     wchar_t lightingPath[MAX_PATH];
+    wchar_t postProcessPath[MAX_PATH];
     wchar_t shadowPath[MAX_PATH];
     wchar_t debugPath[MAX_PATH];
     wchar_t particlePath[MAX_PATH];
@@ -593,6 +649,7 @@ bool RenderingSystem::CompileDeferredShaders()
     wchar_t waterPath[MAX_PATH];
     if (!ResolveShaderPath(L"DeferredGeometry.hlsl", geometryPath, MAX_PATH) ||
         !ResolveShaderPath(L"DeferredLighting.hlsl", lightingPath, MAX_PATH) ||
+        !ResolveShaderPath(L"PostProcessComposite.hlsl", postProcessPath, MAX_PATH) ||
         !ResolveShaderPath(L"ShadowMap.hlsl", shadowPath, MAX_PATH) ||
         !ResolveShaderPath(L"GBufferDebug.hlsl", debugPath, MAX_PATH) ||
         !ResolveShaderPath(L"ParticleDust.hlsl", particlePath, MAX_PATH) ||
@@ -686,6 +743,36 @@ bool RenderingSystem::CompileDeferredShaders()
         flags,
         0,
         &m_deferredLightingPS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        postProcessPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "VSMain",
+        "vs_5_0",
+        flags,
+        0,
+        &m_postProcessVS,
+        nullptr);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    hr = D3DCompileFromFile(
+        postProcessPath,
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "PSMain",
+        "ps_5_0",
+        flags,
+        0,
+        &m_postProcessPS,
         nullptr);
     if (FAILED(hr))
     {
@@ -1059,6 +1146,81 @@ bool RenderingSystem::CreateLightingSrvHeap()
     return true;
 }
 
+// HDR
+bool RenderingSystem::CreateHdrResources()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
+    rtvDesc.NumDescriptors = 1;
+    rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (FAILED(device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&m_hdrRtvHeap))))
+    {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
+    srvDesc.NumDescriptors = 1;
+    srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&m_postProcessSrvHeap))))
+    {
+        return false;
+    }
+
+    m_hdrRtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = m_width;
+    desc.Height = m_height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = desc.Format;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        &clearValue,
+        IID_PPV_ARGS(&m_hdrColorBuffer))))
+    {
+        return false;
+    }
+
+    device->CreateRenderTargetView(
+        m_hdrColorBuffer.Get(),
+        nullptr,
+        m_hdrRtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC hdrSrvDesc{};
+    hdrSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    hdrSrvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    hdrSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    hdrSrvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(
+        m_hdrColorBuffer.Get(),
+        &hdrSrvDesc,
+        m_postProcessSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    m_hdrColorBufferState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    return true;
+}
+
 bool RenderingSystem::CreateShadowMaskTexture()
 {
     ID3D12Device* device = m_context.GetDevice();
@@ -1312,6 +1474,56 @@ bool RenderingSystem::CreateDeferredLightingRootSignature()
         serialized->GetBufferPointer(),
         serialized->GetBufferSize(),
         IID_PPV_ARGS(&m_deferredLightingRootSignature)));
+}
+
+bool RenderingSystem::CreatePostProcessRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE srvRange{};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 1;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParam{};
+    rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParam.DescriptorTable.NumDescriptorRanges = 1;
+    rootParam.DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = 1;
+    desc.pParameters = &rootParam;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers = &sampler;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &desc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized,
+        &error);
+    if (FAILED(hr))
+    {
+        return false;
+    }
+
+    return SUCCEEDED(m_context.GetDevice()->CreateRootSignature(
+        0,
+        serialized->GetBufferPointer(),
+        serialized->GetBufferSize(),
+        IID_PPV_ARGS(&m_postProcessRootSignature)));
 }
 
 bool RenderingSystem::CreateDebugOverlayRootSignature()
@@ -1672,6 +1884,29 @@ bool RenderingSystem::CreateDeferredLightingPipeline()
     pso.SampleDesc.Count = 1;
 
     return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_deferredLightingPSO)));
+}
+
+bool RenderingSystem::CreatePostProcessPipeline()
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_postProcessRootSignature.Get();
+    pso.VS = { m_postProcessVS->GetBufferPointer(), m_postProcessVS->GetBufferSize() };
+    pso.PS = { m_postProcessPS->GetBufferPointer(), m_postProcessPS->GetBufferSize() };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.AlphaToCoverageEnable = FALSE;
+    pso.BlendState.IndependentBlendEnable = FALSE;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.SampleDesc.Count = 1;
+
+    return SUCCEEDED(m_context.GetDevice()->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_postProcessPSO)));
 }
 
 bool RenderingSystem::CreateDebugOverlayPipeline()
@@ -3299,7 +3534,7 @@ void RenderingSystem::UpdateLightingConstants()
 
         cb.LightDirection = XMFLOAT4(0.88f, -1.0f, -0.34f, 0.0f);
         cb.LightColor = XMFLOAT4(1.00f, 0.95f, 0.88f, 3.40f);
-        cb.AmbientColor = XMFLOAT4(0.09f, 0.10f, 0.12f, 0.72f);
+        cb.AmbientColor = XMFLOAT4(0.09f, 0.10f, 0.12f, 0.52f);
         cb.LightCounts = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
 
         cb.PointLightPositionRange[0] = XMFLOAT4(

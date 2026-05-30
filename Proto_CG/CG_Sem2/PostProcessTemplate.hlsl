@@ -35,30 +35,25 @@ float4 PSMain(PSInput input) : SV_TARGET
 {
     float2 uv = saturate(input.UV);
 
-    // Read source data from the G-buffer.
+    // чтение ресурсов из GBuffer
     float4 albedoSpec = GAlbedoSpec.Sample(PointSampler, uv);
     float3 worldPos = GWorldPos.Sample(PointSampler, uv).xyz;
     float3 normalEncoded = GNormal.Sample(PointSampler, uv).xyz;
     float depth = GDepth.Sample(PointSampler, uv).x;
 
-    // Unpack the values used by the current renderer.
+    // распаковка 
     float3 albedo = albedoSpec.rgb;
     float roughness = albedoSpec.a;
     float3 normal = normalize(normalEncoded * 2.0f - 1.0f);
 
-    // Example early out for background pixels.
+    // отсечение фона
     if (depth >= 1.0f)
     {
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    // Temporary debug output:
-    // return float4(albedo, 1.0f);
-    // return float4(normal * 0.5f + 0.5f, 1.0f);
-    // return float4(depth.xxx, 1.0f);
-    // return float4(frac(worldPos * 0.05f), 1.0f);
 
-    // Replace this block with your post-processing logic.
+    // загтовка использования
     float3 color = albedo;
     color *= 0.25f + 0.75f * saturate(normal.y);
     color = lerp(color, float3(1.0f, 0.85f, 0.35f), roughness * 0.15f);
