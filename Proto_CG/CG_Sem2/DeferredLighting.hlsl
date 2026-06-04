@@ -114,14 +114,6 @@ float3 SampleSkyColor(float3 dir)
     return env;
 }
 
-float3 SampleEnvironment(float3 dir, float roughness)
-{
-    float3 sharp = SampleSkyColor(dir);
-    float3 blurred = SampleSkyColor(normalize(float3(dir.x, abs(dir.y) * 0.35f + 0.65f, dir.z)));
-    float blurAmount = saturate(roughness * roughness);
-    return lerp(sharp, blurred, blurAmount);
-}
-
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
 {
     const bool useStaticShadowSelection = ShadowParams.x > 0.5f;
