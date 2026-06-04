@@ -1032,7 +1032,7 @@ UINT D3D12Context::SelectCrowdLodIndex(const SceneObject& object) const
     return static_cast<UINT>(m_lodMeshes.size() - 1);
 }
 
-void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex)
+void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex, bool shadowPass)
 {
     XMVECTOR cameraPos = XMLoadFloat3(&m_cameraPos);
     XMVECTOR cameraTarget = XMLoadFloat3(&m_cameraTarget);
@@ -1051,7 +1051,7 @@ void D3D12Context::UpdateCB(const XMFLOAT4X4& worldMatrix, UINT objectIndex, UIN
     XMFLOAT4X4 projFloat{};
     XMStoreFloat4x4(&viewFloat, view);
     XMStoreFloat4x4(&projFloat, proj);
-    UpdateCBWithMatrices(worldMatrix, viewFloat, projFloat, objectIndex, lodIndex);
+    UpdateCBWithMatrices(worldMatrix, viewFloat, projFloat, objectIndex, lodIndex, shadowPass);
 }
 
 void D3D12Context::UpdateCBWithMatrices(
@@ -1059,7 +1059,8 @@ void D3D12Context::UpdateCBWithMatrices(
     const XMFLOAT4X4& viewMatrix,
     const XMFLOAT4X4& projMatrix,
     UINT objectIndex,
-    UINT lodIndex)
+    UINT lodIndex,
+    bool shadowPass)
 {
     if (m_cbMappedData == nullptr)
     {
@@ -1111,8 +1112,9 @@ void D3D12Context::UpdateCBWithMatrices(
     m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, normalMapStrength, 0.0f);
     if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
     {
-        // Keep displaced geometry stable so shadow receivers do not change with camera distance.
-        m_cbData.TessellationParams = XMFLOAT4(0.48f, 10.0f, 10.0f, 520.0f);
+        m_cbData.TessellationParams = shadowPass
+            ? XMFLOAT4(0.48f, 4.0f, 1.0f, 520.0f)
+            : XMFLOAT4(0.48f, 8.0f, 2.0f, 520.0f);
     }
     else
     {
@@ -2598,7 +2600,7 @@ void D3D12Context::DrawSceneShadowGeometry(
     if (m_sceneObjects.empty())
     {
         static const XMFLOAT4X4 identity = MakeIdentityMatrix();
-        UpdateCBWithMatrices(identity, viewMatrix, projMatrix, ShadowPassCBOffset, 0);
+        UpdateCBWithMatrices(identity, viewMatrix, projMatrix, ShadowPassCBOffset, 0, true);
         commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(ShadowPassCBOffset));
         const MeshData mesh = CaptureCurrentMesh();
         bindMesh(mesh);
@@ -2615,7 +2617,7 @@ void D3D12Context::DrawSceneShadowGeometry(
             const UINT lodIndex = SelectCrowdLodIndex(object);
             const MeshData& mesh = m_lodMeshes[lodIndex];
             const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
-            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, lodIndex);
+            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, lodIndex, true);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
             bindMesh(mesh);
             drawMesh(mesh);
@@ -2626,7 +2628,7 @@ void D3D12Context::DrawSceneShadowGeometry(
                 ? m_sceneMeshes[object.MeshIndex]
                 : CaptureCurrentMesh();
             const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
-            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, 0);
+            UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, 0, true);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
             bindMesh(mesh);
             drawMesh(mesh);

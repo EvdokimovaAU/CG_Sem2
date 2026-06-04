@@ -161,13 +161,14 @@ private:
     bool CreateSolidColorTexture(UINT32 rgba, UINT srvIndex);
     bool CreateSRVHeap(UINT numDescriptors);
 
-    void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex = 0);
+    void UpdateCB(const DirectX::XMFLOAT4X4& worldMatrix, UINT objectIndex, UINT lodIndex = 0, bool shadowPass = false);
     void UpdateCBWithMatrices(
         const DirectX::XMFLOAT4X4& worldMatrix,
         const DirectX::XMFLOAT4X4& viewMatrix,
         const DirectX::XMFLOAT4X4& projMatrix,
         UINT objectIndex,
-        UINT lodIndex = 0);
+        UINT lodIndex = 0,
+        bool shadowPass = false);
     void BuildSceneObjects();
     void UpdateObjectVisibility();
     void BuildOctree();
