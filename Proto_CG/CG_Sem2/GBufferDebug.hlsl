@@ -18,7 +18,7 @@ struct PSInput
     float2 UV : TEXCOORD0;
 };
 
-PSInput VSMain(uint vertexId : SV_VertexID) // 
+PSInput VSMain(uint vertexId : SV_VertexID) 
 {
     PSInput output;
     static const float2 kQuadUV[6] =

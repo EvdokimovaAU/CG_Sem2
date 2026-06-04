@@ -40,6 +40,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD4;
     float3 NormW : TEXCOORD1;
     float2 UV : TEXCOORD0;
+    float3 ViewPos : TEXCOORD5;
 };
 
 HSControlPoint VSMain(VSInput input)
@@ -128,6 +129,65 @@ float4 SampleAntiAliased(Texture2D tex, float2 uv)
     return lerp(baseSample, blurred, saturate(filterStrength * 1.15f));
 }
 
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = saturate(dot(N, H));
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0f) + 1.0f;
+    return a2 / max(3.14159265f * denom * denom, 0.0001f);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
+    return NdotV / max(NdotV * (1.0f - k) + k, 0.0001f);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = saturate(dot(N, V));
+    float NdotL = saturate(dot(N, L));
+    float ggxV = GeometrySchlickGGX(NdotV, roughness);
+    float ggxL = GeometrySchlickGGX(NdotL, roughness);
+    return ggxV * ggxL;
+}
+
+float3 FresnelSchlick(float cosTheta, float3 F0)
+{
+    return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
+}
+
+float3 SampleSkyColor(float3 dir)
+{
+    float up = saturate(dir.y * 0.5f + 0.5f);
+    float horizon = 1.0f - abs(dir.y);
+    float3 groundColor = float3(0.05f, 0.045f, 0.04f);
+    float3 horizonColor = float3(0.78f, 0.82f, 0.88f);
+    float3 zenithColor = float3(0.16f, 0.30f, 0.52f);
+    float3 sky = lerp(horizonColor, zenithColor, saturate(pow(up, 1.35f)));
+    float3 env = lerp(groundColor, sky, up);
+    env += horizonColor * pow(horizon, 6.0f) * 0.08f;
+    return env;
+}
+
+float3 SampleEnvironment(float3 dir, float roughness)
+{
+    float3 sharp = SampleSkyColor(dir);
+    float3 blurred = SampleSkyColor(normalize(float3(dir.x, abs(dir.y) * 0.35f + 0.65f, dir.z)));
+    return lerp(sharp, blurred, saturate(roughness * roughness));
+}
+
+float3 SampleIrradiance(float3 normal)
+{
+    float up = saturate(normal.y * 0.5f + 0.5f);
+    float3 skyIrradiance = lerp(float3(0.24f, 0.26f, 0.30f), float3(0.58f, 0.68f, 0.82f), up);
+    float3 groundBounce = float3(0.06f, 0.05f, 0.045f) * saturate(-normal.y * 0.5f + 0.5f);
+    return skyIrradiance + groundBounce;
+}
+
 [domain("tri")]
 PSInput DSMain(
     HSConstants patchConstants,
@@ -149,6 +209,7 @@ PSInput DSMain(
     float4 posV = mul(posW, View);
     o.PosH = mul(posV, Proj);
     o.WorldPos = posW.xyz;
+    o.ViewPos = posV.xyz;
 
     float3x3 world3x3 = (float3x3)World;
     o.NormW = normalize(mul(world3x3, normal));
@@ -162,27 +223,37 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
     float3 normalSample = SampleAntiAliased(gNormalTex, uv).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
-    float roughness = SampleAntiAliased(gRoughnessTex, uv).r;
+    float roughness = clamp(SampleAntiAliased(gRoughnessTex, uv).r, 0.045f, 1.0f);
     float3x3 tbn = ComputeTBN(normalize(input.NormW), input.WorldPos, uv);
     float3 N = normalize(mul(normalSample, tbn));
     float3 Ldir = normalize(float3(-0.4f, -1.0f, -0.2f));
-    float ndotl = saturate(dot(N, -Ldir));
+    float3 L = -Ldir;
+    float ndotl = saturate(dot(N, L));
 
     float4 albedo = SampleAntiAliased(gTex, uv);
-    albedo.rgb = saturate(pow(albedo.rgb, 1.08f) * 0.82f);
+    albedo.rgb = pow(saturate(albedo.rgb), 2.2f);
 
-    float upFactor = saturate(N.y * 0.5f + 0.5f);
-    float smoothness = 1.0f - roughness;
-    float3 ambient = lerp(float3(0.12f, 0.13f, 0.14f), float3(0.24f, 0.25f, 0.28f), upFactor) * (1.0f - roughness * 0.24f);
-    float specPower = lerp(110.0f, 12.0f, roughness * 0.82f);
-    float3 V = normalize(float3(0.0f, 0.0f, 1.0f));
-    float3 H = normalize(V + (-Ldir));
-    float fresnel = pow(1.0f - saturate(dot(N, V)), 5.0f);
-    float specular = pow(saturate(dot(N, H)), specPower) * lerp(0.16f, 0.03f, roughness) * (1.0f + fresnel * 1.35f);
-    float ambientSpecular = lerp(0.015f, 0.10f, smoothness) * (0.35f + upFactor * 0.65f) * (0.3f + fresnel * 0.7f);
-    float3 diffuse = float3(1.00f, 0.95f, 0.85f) * ndotl;
-    float3 litLinear = (ambient + diffuse) * albedo.rgb + (specular + ambientSpecular).xxx;
-    float3 litSRGB = pow(saturate(litLinear), 1.0f / 2.2f);
+    const float metallic = 0.0f;
+    float3 V = normalize(-input.ViewPos);
+    float3 H = normalize(V + L);
+    float NdotV = saturate(dot(N, V));
+    float VdotH = saturate(dot(V, H));
+    float3 F0 = lerp(0.04f.xxx, albedo.rgb, metallic);
+    float3 F = FresnelSchlick(VdotH, F0);
+    float D = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    float3 specular = (D * G * F) / max(4.0f * NdotV * ndotl, 0.0001f);
+    float3 kD = (1.0f.xxx - F) * (1.0f - metallic);
+    float3 diffuse = kD * albedo.rgb / 3.14159265f;
+    float3 radiance = 3.5f.xxx;
+    float3 ambientDiffuse = SampleIrradiance(N) * albedo.rgb * kD * 0.35f;
+    float3 R = reflect(-V, N);
+    float3 ambientSpecular = SampleEnvironment(R, roughness) * FresnelSchlick(NdotV, F0) * lerp(1.0f, 0.35f, roughness);
+    float sunReflection = pow(saturate(dot(R, L)), lerp(96.0f, 8.0f, roughness));
+    ambientSpecular += radiance * sunReflection * FresnelSchlick(NdotV, F0) * (1.0f - roughness * 0.5f);
+    float3 litLinear = ambientDiffuse + ambientSpecular + (diffuse + specular) * radiance * ndotl;
+    float3 toneMapped = litLinear / (litLinear + 1.0f.xxx);
+    float3 litSRGB = pow(saturate(toneMapped), 1.0f / 2.2f);
 
     return float4(litSRGB, albedo.a);
 }

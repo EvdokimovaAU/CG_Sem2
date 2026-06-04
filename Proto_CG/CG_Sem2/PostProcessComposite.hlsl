@@ -120,7 +120,6 @@ float3 ComputeToneMappedColor(float2 uv, float averageLuminance, float exposure)
 
 float3 ApplyChromaticAberration(float2 uv, float averageLuminance, float exposure)
 {
-    // Slide 31: read RGB from slightly different distances to the screen center.
     const float chromaticAmount = 0.045f;
     const float2 redUv = DistortChromaticUv(uv, chromaticAmount);
     const float2 greenUv = DistortChromaticUv(uv, chromaticAmount * 0.35f);
@@ -133,7 +132,7 @@ float3 ApplyChromaticAberration(float2 uv, float averageLuminance, float exposur
     return float3(redColor.r, greenColor.g, blueColor.b);
 }
 
-// edge darkening
+
 float ComputeVignette(float2 uv, float strength, float roundness)
 {
     float2 centeredUv = uv * 2.0f - 1.0f;
@@ -149,14 +148,16 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     // Eye Adaptation
     const float middleGray = 0.72f;
-    const float exposure = saturate(middleGray / max(averageLuminance, 0.0001f)) * 1.8f;
+    const float exposure = saturate(middleGray / max(averageLuminance, 0.0001f)) * 0.8f;
 
     float3 toneMapped = ApplyChromaticAberration(input.UV, averageLuminance, exposure);
 
+    // Vignette
     const float vignetteStrength = 0.88f;
     const float vignetteRoundness = 1.0f;
     toneMapped *= ComputeVignette(input.UV, vignetteStrength, vignetteRoundness);
 
+    // Gamma Correction
     const float3 monitorColor = pow(saturate(toneMapped), 1.0f / 2.2f);
     return float4(monitorColor, 1.0f);
 }

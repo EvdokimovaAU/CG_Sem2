@@ -173,9 +173,9 @@ GBufferOutput PSMain(PSInput input)
     float2 uv = input.UV * UVTransform.xy + UVTransform.zw;
     const float lodFilterStrength = saturate(TimeParams.y);
     float4 albedo = SampleByLodStrength(gTex, uv, lodFilterStrength);
-    albedo.rgb = saturate(pow(albedo.rgb, 1.08f) * 0.82f);
+    albedo.rgb = pow(saturate(albedo.rgb), 2.2f);
     float roughness = SampleByLodStrength(gRoughnessTex, uv, lodFilterStrength).r;
-    roughness = saturate(0.18f + roughness * 0.72f);
+    roughness = clamp(roughness, 0.045f, 1.0f);
     float3 normalSample = SampleByLodStrength(gNormalTex, uv, lodFilterStrength).xyz * 2.0f - 1.0f;
     normalSample.y *= -1.0f;
     float3 baseNormal = normalize(input.NormalW);

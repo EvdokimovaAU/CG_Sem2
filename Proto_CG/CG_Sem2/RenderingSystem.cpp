@@ -1,6 +1,7 @@
 #include "RenderingSystem.h"
 
 #include <array>
+#include <fstream>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -31,7 +32,105 @@ namespace
     constexpr UINT kFireThreadGroupSize = 64;
     constexpr UINT kLightingShadowMapSrv = GBuffer::TargetCount;
     constexpr UINT kLightingShadowMaskSrv = GBuffer::TargetCount + 1;
-    constexpr UINT kLightingSrvCount = GBuffer::TargetCount + 2;
+    constexpr UINT kLightingIrradianceSrv = GBuffer::TargetCount + 2;
+    constexpr UINT kLightingBrdfSrv = GBuffer::TargetCount + 3;
+    constexpr UINT kLightingPrefilterSrv = GBuffer::TargetCount + 4;
+    constexpr UINT kLightingSrvCount = GBuffer::TargetCount + 5;
+
+    constexpr UINT DDS_MAGIC = 0x20534444u;
+    constexpr UINT DDS_FOURCC = 0x00000004u;
+    constexpr UINT DDSCAPS2_CUBEMAP = 0x00000200u;
+    constexpr UINT DDSCAPS2_CUBEMAP_ALLFACES = 0x0000FC00u;
+    constexpr UINT DDS_RESOURCE_MISC_TEXTURECUBE = 0x4u;
+
+    struct DDS_PIXELFORMAT
+    {
+        UINT size;
+        UINT flags;
+        UINT fourCC;
+        UINT RGBBitCount;
+        UINT RBitMask;
+        UINT GBitMask;
+        UINT BBitMask;
+        UINT ABitMask;
+    };
+
+    struct DDS_HEADER
+    {
+        UINT size;
+        UINT flags;
+        UINT height;
+        UINT width;
+        UINT pitchOrLinearSize;
+        UINT depth;
+        UINT mipMapCount;
+        UINT reserved1[11];
+        DDS_PIXELFORMAT ddspf;
+        UINT caps;
+        UINT caps2;
+        UINT caps3;
+        UINT caps4;
+        UINT reserved2;
+    };
+
+    struct DDS_HEADER_DXT10
+    {
+        DXGI_FORMAT dxgiFormat;
+        UINT resourceDimension;
+        UINT miscFlag;
+        UINT arraySize;
+        UINT miscFlags2;
+    };
+
+    UINT BitsPerPixel(DXGI_FORMAT format)
+    {
+        switch (format)
+        {
+        case DXGI_FORMAT_BC1_TYPELESS:
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB:
+        case DXGI_FORMAT_BC4_TYPELESS:
+        case DXGI_FORMAT_BC4_UNORM:
+        case DXGI_FORMAT_BC4_SNORM:
+            return 4;
+        case DXGI_FORMAT_BC2_TYPELESS:
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:
+        case DXGI_FORMAT_BC3_TYPELESS:
+        case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:
+        case DXGI_FORMAT_BC5_TYPELESS:
+        case DXGI_FORMAT_BC5_UNORM:
+        case DXGI_FORMAT_BC5_SNORM:
+        case DXGI_FORMAT_BC6H_TYPELESS:
+        case DXGI_FORMAT_BC6H_UF16:
+        case DXGI_FORMAT_BC6H_SF16:
+        case DXGI_FORMAT_BC7_TYPELESS:
+        case DXGI_FORMAT_BC7_UNORM:
+        case DXGI_FORMAT_BC7_UNORM_SRGB:
+            return 8;
+        default:
+            return 0;
+        }
+    }
+
+    void GetSurfaceInfo(size_t width, size_t height, DXGI_FORMAT fmt, size_t& outNumBytes, size_t& outRowBytes, size_t& outNumRows)
+    {
+        const UINT bpe = BitsPerPixel(fmt);
+        if (bpe == 0)
+        {
+            outNumBytes = 0;
+            outRowBytes = 0;
+            outNumRows = 0;
+            return;
+        }
+
+        const size_t numBlocksWide = (std::max<size_t>)(1u, (width + 3u) / 4u);
+        const size_t numBlocksHigh = (std::max<size_t>)(1u, (height + 3u) / 4u);
+        outRowBytes = numBlocksWide * bpe;
+        outNumRows = numBlocksHigh;
+        outNumBytes = outRowBytes * numBlocksHigh;
+    }
 
     struct DebugOverlayConstants
     {
@@ -173,6 +272,12 @@ void RenderingSystem::Shutdown()
     m_waterConstantBuffer.Reset();
     m_shadowMap.Reset();
     m_hdrColorBuffer.Reset();
+    m_irradianceMap.Reset();
+    m_irradianceMapUpload.Reset();
+    m_brdfIntegrationMap.Reset();
+    m_brdfIntegrationMapUpload.Reset();
+    m_prefilteredEnvMap.Reset();
+    m_prefilteredEnvMapUpload.Reset();
     m_shadowMaskTexture.Reset();
     m_shadowMaskTextureUpload.Reset();
     m_deferredGeometryPSO.Reset();
@@ -607,6 +712,9 @@ bool RenderingSystem::InitializeDeferredResources()
         CreateShadowRootSignature() &&
         CreateShadowPipeline() &&
         CreateHdrResources() &&
+        CreateIrradianceMapResource() &&
+        CreateBrdfIntegrationMapResource() &&
+        CreatePrefilteredEnvMapResource() &&
         CreateLightingSrvHeap() &&
         CreateDeferredLightingRootSignature() &&
         CreateDeferredGeometryPipeline() &&
@@ -1143,6 +1251,48 @@ bool RenderingSystem::CreateLightingSrvHeap()
         m_context.GetDevice()->CreateShaderResourceView(m_shadowMaskTexture.Get(), &maskSrvDesc, maskHandle);
     }
 
+    if (m_irradianceMap != nullptr)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC irradianceSrvDesc{};
+        irradianceSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        irradianceSrvDesc.Format = m_irradianceMap->GetDesc().Format;
+        irradianceSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        irradianceSrvDesc.TextureCube.MostDetailedMip = 0;
+        irradianceSrvDesc.TextureCube.MipLevels = m_irradianceMap->GetDesc().MipLevels;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE irradianceHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        irradianceHandle.ptr += SIZE_T(kLightingIrradianceSrv) * SIZE_T(m_lightingSrvDescriptorSize);
+        m_context.GetDevice()->CreateShaderResourceView(m_irradianceMap.Get(), &irradianceSrvDesc, irradianceHandle);
+    }
+
+    if (m_brdfIntegrationMap != nullptr)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC brdfSrvDesc{};
+        brdfSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        brdfSrvDesc.Format = m_brdfIntegrationMap->GetDesc().Format;
+        brdfSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        brdfSrvDesc.Texture2D.MostDetailedMip = 0;
+        brdfSrvDesc.Texture2D.MipLevels = m_brdfIntegrationMap->GetDesc().MipLevels;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE brdfHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        brdfHandle.ptr += SIZE_T(kLightingBrdfSrv) * SIZE_T(m_lightingSrvDescriptorSize);
+        m_context.GetDevice()->CreateShaderResourceView(m_brdfIntegrationMap.Get(), &brdfSrvDesc, brdfHandle);
+    }
+
+    if (m_prefilteredEnvMap != nullptr)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC prefilterSrvDesc{};
+        prefilterSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        prefilterSrvDesc.Format = m_prefilteredEnvMap->GetDesc().Format;
+        prefilterSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        prefilterSrvDesc.TextureCube.MostDetailedMip = 0;
+        prefilterSrvDesc.TextureCube.MipLevels = m_prefilteredEnvMap->GetDesc().MipLevels;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE prefilterHandle = m_lightingSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        prefilterHandle.ptr += SIZE_T(kLightingPrefilterSrv) * SIZE_T(m_lightingSrvDescriptorSize);
+        m_context.GetDevice()->CreateShaderResourceView(m_prefilteredEnvMap.Get(), &prefilterSrvDesc, prefilterHandle);
+    }
+
     return true;
 }
 
@@ -1218,6 +1368,641 @@ bool RenderingSystem::CreateHdrResources()
         m_postProcessSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
     m_hdrColorBufferState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    return true;
+}
+
+bool RenderingSystem::CreateIrradianceMapResource()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    if (device == nullptr || commandList == nullptr)
+    {
+        return false;
+    }
+
+    wchar_t texturePathW[MAX_PATH];
+    if (!ResolveAssetPath(L"Stuff\\IrradianceMap_BC6U.dds", texturePathW, MAX_PATH))
+    {
+        return false;
+    }
+
+    std::ifstream file(texturePathW, std::ios::binary | std::ios::ate);
+    if (!file)
+    {
+        return false;
+    }
+
+    const std::streamsize fileSize = file.tellg();
+    if (fileSize <= 0)
+    {
+        return false;
+    }
+
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> ddsData(static_cast<size_t>(fileSize));
+    if (!file.read(reinterpret_cast<char*>(ddsData.data()), fileSize))
+    {
+        return false;
+    }
+
+    if (ddsData.size() < sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10))
+    {
+        return false;
+    }
+
+    const UINT magic = *reinterpret_cast<const UINT*>(ddsData.data());
+    if (magic != DDS_MAGIC)
+    {
+        return false;
+    }
+
+    const DDS_HEADER* header = reinterpret_cast<const DDS_HEADER*>(ddsData.data() + sizeof(UINT));
+    if (header->size != sizeof(DDS_HEADER) || header->ddspf.size != sizeof(DDS_PIXELFORMAT))
+    {
+        return false;
+    }
+
+    if ((header->ddspf.flags & DDS_FOURCC) == 0 || header->ddspf.fourCC != '01XD')
+    {
+        return false;
+    }
+
+    const DDS_HEADER_DXT10* dxt10Header =
+        reinterpret_cast<const DDS_HEADER_DXT10*>(ddsData.data() + sizeof(UINT) + sizeof(DDS_HEADER));
+
+    if (dxt10Header->resourceDimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        (dxt10Header->miscFlag & DDS_RESOURCE_MISC_TEXTURECUBE) == 0 ||
+        (header->caps2 & DDSCAPS2_CUBEMAP) == 0 ||
+        (header->caps2 & DDSCAPS2_CUBEMAP_ALLFACES) != DDSCAPS2_CUBEMAP_ALLFACES)
+    {
+        return false;
+    }
+
+    UINT arraySize = dxt10Header->arraySize;
+    if (arraySize == 0)
+    {
+        return false;
+    }
+
+    if (arraySize == 6)
+    {
+        arraySize = 1;
+    }
+
+    const UINT mipLevels = header->mipMapCount > 0 ? header->mipMapCount : 1u;
+    const UINT faceCount = arraySize * 6u;
+    const DXGI_FORMAT format = dxt10Header->dxgiFormat;
+    if (BitsPerPixel(format) == 0)
+    {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC textureDesc{};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = header->width;
+    textureDesc.Height = header->height;
+    textureDesc.DepthOrArraySize = static_cast<UINT16>(faceCount);
+    textureDesc.MipLevels = static_cast<UINT16>(mipLevels);
+    textureDesc.Format = format;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_irradianceMap))))
+    {
+        return false;
+    }
+
+    const UINT subresourceCount = faceCount * mipLevels;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresourceCount);
+    std::vector<UINT> numRows(subresourceCount);
+    std::vector<UINT64> rowSizes(subresourceCount);
+    UINT64 uploadSize = 0;
+    device->GetCopyableFootprints(
+        &textureDesc,
+        0,
+        subresourceCount,
+        0,
+        footprints.data(),
+        numRows.data(),
+        rowSizes.data(),
+        &uploadSize);
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_irradianceMapUpload))))
+    {
+        return false;
+    }
+
+    void* mappedData = nullptr;
+    if (FAILED(m_irradianceMapUpload->Map(0, nullptr, &mappedData)) || mappedData == nullptr)
+    {
+        return false;
+    }
+
+    size_t dataOffset = sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10);
+    for (UINT face = 0; face < faceCount; ++face)
+    {
+        size_t width = header->width;
+        size_t height = header->height;
+
+        for (UINT mip = 0; mip < mipLevels; ++mip)
+        {
+            const UINT subresourceIndex = face * mipLevels + mip;
+            size_t srcNumBytes = 0;
+            size_t srcRowBytes = 0;
+            size_t srcNumRows = 0;
+            GetSurfaceInfo(width, height, format, srcNumBytes, srcRowBytes, srcNumRows);
+            if (srcNumBytes == 0 || dataOffset + srcNumBytes > ddsData.size())
+            {
+                m_irradianceMapUpload->Unmap(0, nullptr);
+                return false;
+            }
+
+            auto* dstSlice = static_cast<uint8_t*>(mappedData) + footprints[subresourceIndex].Offset;
+            const uint8_t* srcSlice = ddsData.data() + dataOffset;
+
+            for (size_t row = 0; row < srcNumRows; ++row)
+            {
+                memcpy(
+                    dstSlice + row * footprints[subresourceIndex].Footprint.RowPitch,
+                    srcSlice + row * srcRowBytes,
+                    srcRowBytes);
+            }
+
+            dataOffset += srcNumBytes;
+            width = (std::max<size_t>)(1u, width >> 1u);
+            height = (std::max<size_t>)(1u, height >> 1u);
+        }
+    }
+
+    m_irradianceMapUpload->Unmap(0, nullptr);
+
+    for (UINT subresourceIndex = 0; subresourceIndex < subresourceCount; ++subresourceIndex)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = m_irradianceMap.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = subresourceIndex;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_irradianceMapUpload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = footprints[subresourceIndex];
+
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_irradianceMap.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+
+    return true;
+}
+
+bool RenderingSystem::CreateBrdfIntegrationMapResource()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    if (device == nullptr || commandList == nullptr)
+    {
+        return false;
+    }
+
+    wchar_t texturePathW[MAX_PATH];
+    if (!ResolveAssetPath(L"Stuff\\IntegrationMap.dds", texturePathW, MAX_PATH))
+    {
+        return false;
+    }
+
+    std::ifstream file(texturePathW, std::ios::binary | std::ios::ate);
+    if (!file)
+    {
+        return false;
+    }
+
+    const std::streamsize fileSize = file.tellg();
+    if (fileSize <= 0)
+    {
+        return false;
+    }
+
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> ddsData(static_cast<size_t>(fileSize));
+    if (!file.read(reinterpret_cast<char*>(ddsData.data()), fileSize))
+    {
+        return false;
+    }
+
+    if (ddsData.size() < sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10))
+    {
+        return false;
+    }
+
+    const UINT magic = *reinterpret_cast<const UINT*>(ddsData.data());
+    if (magic != DDS_MAGIC)
+    {
+        return false;
+    }
+
+    const DDS_HEADER* header = reinterpret_cast<const DDS_HEADER*>(ddsData.data() + sizeof(UINT));
+    if (header->size != sizeof(DDS_HEADER) || header->ddspf.size != sizeof(DDS_PIXELFORMAT))
+    {
+        return false;
+    }
+
+    if ((header->ddspf.flags & DDS_FOURCC) == 0 || header->ddspf.fourCC != '01XD')
+    {
+        return false;
+    }
+
+    const DDS_HEADER_DXT10* dxt10Header =
+        reinterpret_cast<const DDS_HEADER_DXT10*>(ddsData.data() + sizeof(UINT) + sizeof(DDS_HEADER));
+
+    if (dxt10Header->resourceDimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        (dxt10Header->miscFlag & DDS_RESOURCE_MISC_TEXTURECUBE) != 0 ||
+        dxt10Header->arraySize != 1)
+    {
+        return false;
+    }
+
+    const UINT mipLevels = header->mipMapCount > 0 ? header->mipMapCount : 1u;
+    const DXGI_FORMAT format = dxt10Header->dxgiFormat;
+    const UINT bytesPerPixel = 8u; // IntegrationMap.dds is R32G32_FLOAT.
+    if (format != DXGI_FORMAT_R32G32_FLOAT)
+    {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC textureDesc{};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = header->width;
+    textureDesc.Height = header->height;
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = static_cast<UINT16>(mipLevels);
+    textureDesc.Format = format;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_brdfIntegrationMap))))
+    {
+        return false;
+    }
+
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mipLevels);
+    std::vector<UINT> numRows(mipLevels);
+    std::vector<UINT64> rowSizes(mipLevels);
+    UINT64 uploadSize = 0;
+    device->GetCopyableFootprints(
+        &textureDesc,
+        0,
+        mipLevels,
+        0,
+        footprints.data(),
+        numRows.data(),
+        rowSizes.data(),
+        &uploadSize);
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_brdfIntegrationMapUpload))))
+    {
+        return false;
+    }
+
+    void* mappedData = nullptr;
+    if (FAILED(m_brdfIntegrationMapUpload->Map(0, nullptr, &mappedData)) || mappedData == nullptr)
+    {
+        return false;
+    }
+
+    size_t dataOffset = sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10);
+    size_t width = header->width;
+    size_t height = header->height;
+    for (UINT mip = 0; mip < mipLevels; ++mip)
+    {
+        const size_t srcRowBytes = width * bytesPerPixel;
+        const size_t srcNumRows = height;
+        const size_t srcNumBytes = srcRowBytes * srcNumRows;
+        if (dataOffset + srcNumBytes > ddsData.size())
+        {
+            m_brdfIntegrationMapUpload->Unmap(0, nullptr);
+            return false;
+        }
+
+        auto* dstSlice = static_cast<uint8_t*>(mappedData) + footprints[mip].Offset;
+        const uint8_t* srcSlice = ddsData.data() + dataOffset;
+
+        for (size_t row = 0; row < srcNumRows; ++row)
+        {
+            memcpy(
+                dstSlice + row * footprints[mip].Footprint.RowPitch,
+                srcSlice + row * srcRowBytes,
+                srcRowBytes);
+        }
+
+        dataOffset += srcNumBytes;
+        width = (std::max<size_t>)(1u, width >> 1u);
+        height = (std::max<size_t>)(1u, height >> 1u);
+    }
+
+    m_brdfIntegrationMapUpload->Unmap(0, nullptr);
+
+    for (UINT mip = 0; mip < mipLevels; ++mip)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = m_brdfIntegrationMap.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = mip;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_brdfIntegrationMapUpload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = footprints[mip];
+
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_brdfIntegrationMap.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+
+    return true;
+}
+
+bool RenderingSystem::CreatePrefilteredEnvMapResource()
+{
+    ID3D12Device* device = m_context.GetDevice();
+    ID3D12GraphicsCommandList* commandList = m_context.GetCommandList();
+    if (device == nullptr || commandList == nullptr)
+    {
+        return false;
+    }
+
+    wchar_t texturePathW[MAX_PATH];
+    if (!ResolveAssetPath(L"Stuff\\PreFilteredEnvMap_BC6U.dds", texturePathW, MAX_PATH))
+    {
+        return false;
+    }
+
+    std::ifstream file(texturePathW, std::ios::binary | std::ios::ate);
+    if (!file)
+    {
+        return false;
+    }
+
+    const std::streamsize fileSize = file.tellg();
+    if (fileSize <= 0)
+    {
+        return false;
+    }
+
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> ddsData(static_cast<size_t>(fileSize));
+    if (!file.read(reinterpret_cast<char*>(ddsData.data()), fileSize))
+    {
+        return false;
+    }
+
+    if (ddsData.size() < sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10))
+    {
+        return false;
+    }
+
+    const UINT magic = *reinterpret_cast<const UINT*>(ddsData.data());
+    if (magic != DDS_MAGIC)
+    {
+        return false;
+    }
+
+    const DDS_HEADER* header = reinterpret_cast<const DDS_HEADER*>(ddsData.data() + sizeof(UINT));
+    if (header->size != sizeof(DDS_HEADER) || header->ddspf.size != sizeof(DDS_PIXELFORMAT))
+    {
+        return false;
+    }
+
+    if ((header->ddspf.flags & DDS_FOURCC) == 0 || header->ddspf.fourCC != '01XD')
+    {
+        return false;
+    }
+
+    const DDS_HEADER_DXT10* dxt10Header =
+        reinterpret_cast<const DDS_HEADER_DXT10*>(ddsData.data() + sizeof(UINT) + sizeof(DDS_HEADER));
+
+    if (dxt10Header->resourceDimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        (dxt10Header->miscFlag & DDS_RESOURCE_MISC_TEXTURECUBE) == 0 ||
+        (header->caps2 & DDSCAPS2_CUBEMAP) == 0 ||
+        (header->caps2 & DDSCAPS2_CUBEMAP_ALLFACES) != DDSCAPS2_CUBEMAP_ALLFACES)
+    {
+        return false;
+    }
+
+    UINT arraySize = dxt10Header->arraySize;
+    if (arraySize == 0)
+    {
+        return false;
+    }
+
+    if (arraySize == 6)
+    {
+        arraySize = 1;
+    }
+
+    const UINT mipLevels = header->mipMapCount > 0 ? header->mipMapCount : 1u;
+    const UINT faceCount = arraySize * 6u;
+    const DXGI_FORMAT format = dxt10Header->dxgiFormat;
+    if (BitsPerPixel(format) == 0)
+    {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC textureDesc{};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Width = header->width;
+    textureDesc.Height = header->height;
+    textureDesc.DepthOrArraySize = static_cast<UINT16>(faceCount);
+    textureDesc.MipLevels = static_cast<UINT16>(mipLevels);
+    textureDesc.Format = format;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_prefilteredEnvMap))))
+    {
+        return false;
+    }
+
+    const UINT subresourceCount = faceCount * mipLevels;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresourceCount);
+    std::vector<UINT> numRows(subresourceCount);
+    std::vector<UINT64> rowSizes(subresourceCount);
+    UINT64 uploadSize = 0;
+    device->GetCopyableFootprints(
+        &textureDesc,
+        0,
+        subresourceCount,
+        0,
+        footprints.data(),
+        numRows.data(),
+        rowSizes.data(),
+        &uploadSize);
+
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&m_prefilteredEnvMapUpload))))
+    {
+        return false;
+    }
+
+    void* mappedData = nullptr;
+    if (FAILED(m_prefilteredEnvMapUpload->Map(0, nullptr, &mappedData)) || mappedData == nullptr)
+    {
+        return false;
+    }
+
+    size_t dataOffset = sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10);
+    for (UINT face = 0; face < faceCount; ++face)
+    {
+        size_t width = header->width;
+        size_t height = header->height;
+
+        for (UINT mip = 0; mip < mipLevels; ++mip)
+        {
+            const UINT subresourceIndex = face * mipLevels + mip;
+            size_t srcNumBytes = 0;
+            size_t srcRowBytes = 0;
+            size_t srcNumRows = 0;
+            GetSurfaceInfo(width, height, format, srcNumBytes, srcRowBytes, srcNumRows);
+            if (srcNumBytes == 0 || dataOffset + srcNumBytes > ddsData.size())
+            {
+                m_prefilteredEnvMapUpload->Unmap(0, nullptr);
+                return false;
+            }
+
+            auto* dstSlice = static_cast<uint8_t*>(mappedData) + footprints[subresourceIndex].Offset;
+            const uint8_t* srcSlice = ddsData.data() + dataOffset;
+
+            for (size_t row = 0; row < srcNumRows; ++row)
+            {
+                memcpy(
+                    dstSlice + row * footprints[subresourceIndex].Footprint.RowPitch,
+                    srcSlice + row * srcRowBytes,
+                    srcRowBytes);
+            }
+
+            dataOffset += srcNumBytes;
+            width = (std::max<size_t>)(1u, width >> 1u);
+            height = (std::max<size_t>)(1u, height >> 1u);
+        }
+    }
+
+    m_prefilteredEnvMapUpload->Unmap(0, nullptr);
+
+    for (UINT subresourceIndex = 0; subresourceIndex < subresourceCount; ++subresourceIndex)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = m_prefilteredEnvMap.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = subresourceIndex;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_prefilteredEnvMapUpload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = footprints[subresourceIndex];
+
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_prefilteredEnvMap.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+
     return true;
 }
 
@@ -3488,13 +4273,13 @@ void RenderingSystem::UpdateLightingConstants()
     const float dominantExtent = (std::max)(sceneExtents.x, (std::max)(sceneExtents.y, sceneExtents.z));
     if (m_context.GetCurrentScene() == Scene::Sponza)
     {
-        const float pointRange = (std::max)(dominantExtent * 0.34f, 260.0f);
-        const float spotRange = (std::max)(dominantExtent * 0.44f, 360.0f);
+        const float pointRange = (std::max)(dominantExtent * 0.52f, 420.0f);
+        const float spotRange = (std::max)(dominantExtent * 0.62f, 520.0f);
 
         // Imported Sponza lighting setup: directional + point + spot.
         cb.LightDirection = XMFLOAT4(-0.4f, -1.0f, -0.2f, 0.0f);
-        cb.LightColor = XMFLOAT4(0.98f, 0.96f, 0.93f, 0.20f);
-        cb.AmbientColor = XMFLOAT4(0.009f, 0.009f, 0.012f, 1.0f);
+        cb.LightColor = XMFLOAT4(1.00f, 0.98f, 0.95f, 0.55f);
+        cb.AmbientColor = XMFLOAT4(0.030f, 0.032f, 0.040f, 1.0f);
         cb.LightCounts = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
 
         cb.PointLightPositionRange[0] = XMFLOAT4(
@@ -3502,7 +4287,7 @@ void RenderingSystem::UpdateLightingConstants()
             sceneCenter.y + sceneExtents.y * 0.20f,
             sceneCenter.z - sceneExtents.z * 0.04f,
             pointRange);
-        cb.PointLightColorIntensity[0] = XMFLOAT4(0.12f, 0.48f, 1.00f, 3.80f);
+        cb.PointLightColorIntensity[0] = XMFLOAT4(0.18f, 0.56f, 1.00f, 28.0f);
 
         cb.SpotLightPositionRange[0] = XMFLOAT4(
             sceneCenter.x + sceneExtents.x * 0.14f,
@@ -3510,7 +4295,7 @@ void RenderingSystem::UpdateLightingConstants()
             sceneCenter.z - sceneExtents.z * 0.08f,
             spotRange);
         cb.SpotLightDirectionCosine[0] = XMFLOAT4(-0.08f, -0.99f, 0.10f, 0.76f);
-        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.38f, 0.10f, 3.10f);
+        cb.SpotLightColorIntensity[0] = XMFLOAT4(1.00f, 0.42f, 0.12f, 22.0f);
     }
     else if (m_context.GetCurrentScene() == Scene::ChickenField)
     {
@@ -3572,6 +4357,8 @@ void RenderingSystem::UpdateLightingConstants()
     XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
     XMStoreFloat4x4(&cb.InvView, XMMatrixTranspose(invView));
     XMStoreFloat4x4(&cb.InvProj, XMMatrixTranspose(invProj));
+    const UINT prefilteredMipCount = (m_prefilteredEnvMap != nullptr) ? m_prefilteredEnvMap->GetDesc().MipLevels : 1u;
+    cb.IblParams = XMFLOAT4(static_cast<float>((std::max)(int(prefilteredMipCount) - 1, 0)), 0.0f, 0.0f, 0.0f);
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
 }

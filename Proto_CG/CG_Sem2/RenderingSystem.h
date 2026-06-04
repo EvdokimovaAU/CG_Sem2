@@ -69,6 +69,9 @@ private:
     bool CreateShadowRootSignature();
     bool CreateShadowPipeline();
     bool CreateHdrResources();
+    bool CreateIrradianceMapResource();
+    bool CreateBrdfIntegrationMapResource();
+    bool CreatePrefilteredEnvMapResource();
     bool CreateLightingSrvHeap();
     bool CreateShadowMaskTexture();
     bool CreateDeferredLightingRootSignature();
@@ -134,6 +137,7 @@ private:
         DirectX::XMFLOAT4X4 LightViewProj[ShadowCascadeCount]; // сами матрицы каскадов
         DirectX::XMFLOAT4X4 InvView;
         DirectX::XMFLOAT4X4 InvProj;
+        DirectX::XMFLOAT4 IblParams;
     };
 
     struct WaterCB
@@ -240,6 +244,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waterPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowMap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_hdrColorBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_irradianceMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_irradianceMapUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_brdfIntegrationMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_brdfIntegrationMapUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_prefilteredEnvMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_prefilteredEnvMapUpload;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_hdrRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_lightingSrvHeap;

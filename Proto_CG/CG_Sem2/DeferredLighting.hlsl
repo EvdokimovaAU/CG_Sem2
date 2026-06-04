@@ -17,6 +17,7 @@ cbuffer DeferredLightCB : register(b0)
     float4x4 LightViewProj[4];
     float4x4 InvView;
     float4x4 InvProj;
+    float4 IblParams;
 };
 
 #define POST_PROCESS_DEBUG_MODE 0
@@ -27,6 +28,9 @@ Texture2D<float4> GNormal : register(t2);
 Texture2D<float4> GDepth : register(t3);
 Texture2DArray<float> ShadowMap : register(t4); // массив каскадов
 Texture2D<float4> ShadowMaskTex : register(t5);
+TextureCube<float4> IrradianceMap : register(t6);
+Texture2D<float2> BrdfIntegrationMap : register(t7);
+TextureCube<float4> PrefilteredEnvMap : register(t8);
 SamplerState ShadowSampler : register(s0);
 SamplerState ShadowMaskSampler : register(s1);
 
@@ -90,6 +94,32 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    return F0 + (max(1.0f.xxx - roughness.xxx, F0) - F0) * pow(1.0f - cosTheta, 5.0f);
+}
+
+float3 SampleSkyColor(float3 dir)
+{
+    float up = saturate(dir.y * 0.5f + 0.5f);
+    float horizon = 1.0f - abs(dir.y);
+    float3 groundColor = float3(0.05f, 0.045f, 0.04f);
+    float3 horizonColor = float3(0.78f, 0.82f, 0.88f);
+    float3 zenithColor = float3(0.16f, 0.30f, 0.52f);
+    float3 sky = lerp(horizonColor, zenithColor, saturate(pow(up, 1.35f)));
+    float3 env = lerp(groundColor, sky, up);
+    env += horizonColor * pow(horizon, 6.0f) * 0.08f;
+    return env;
+}
+
+float3 SampleEnvironment(float3 dir, float roughness)
+{
+    float3 sharp = SampleSkyColor(dir);
+    float3 blurred = SampleSkyColor(normalize(float3(dir.x, abs(dir.y) * 0.35f + 0.65f, dir.z)));
+    float blurAmount = saturate(roughness * roughness);
+    return lerp(sharp, blurred, blurAmount);
 }
 
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
@@ -162,6 +192,7 @@ float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
 float3 EvaluateLight(
     float3 albedo,
     float roughness,
+    float metallic,
     float3 N,
     float3 V,
     float3 L,
@@ -177,11 +208,9 @@ float3 EvaluateLight(
         return 0.0f.xxx;
     }
 
-    float smoothness = 1.0f - roughness;
-    float clampedRoughness = clamp(lerp(0.12f, 1.0f, roughness * 0.90f), 0.12f, 1.0f);
-    float3 F0 = lerp(float3(0.026f, 0.026f, 0.026f), float3(0.045f, 0.045f, 0.045f), smoothness * 0.45f);
+    float clampedRoughness = clamp(roughness, 0.045f, 1.0f);
+    float3 F0 = lerp(0.04f.xxx, albedo, metallic);
     float3 F = FresnelSchlick(HdotV, F0);
-    F *= lerp(0.72f, 0.90f, roughness);
     float D = DistributionGGX(N, H, clampedRoughness);
     float G = GeometrySmith(N, V, L, clampedRoughness);
 
@@ -189,7 +218,7 @@ float3 EvaluateLight(
     float denominator = max(4.0f * NdotV * NdotL, 0.0001f);
     float3 specular = numerator / denominator;
 
-    float3 kd = (1.0f.xxx - F) * (1.0f - smoothness * 0.05f);
+    float3 kd = (1.0f.xxx - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / 3.14159265f;
     return (diffuse + specular) * radiance * NdotL;
 }
@@ -209,8 +238,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 albedo = albedoSpec.rgb;
-    float roughness = saturate(albedoSpec.a);
-    float smoothness = 1.0f - roughness;
+    float roughness = clamp(albedoSpec.a, 0.045f, 1.0f);
+    const float metallic = 0.0f;
     float3 normal = normalize(normalEncoded * 2.0f - 1.0f);
 
 #if POST_PROCESS_DEBUG_MODE == 1
@@ -227,21 +256,29 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 cameraPos = GetCameraPositionWS();
     float3 V = normalize(cameraPos - worldPos);
 
-    float upFactor = saturate(normal.y * 0.5f + 0.5f);
     const float sceneColorScale = AmbientColor.a;
-    float3 skyAmbient = AmbientColor.rgb * lerp(0.72f, 1.18f, upFactor);
-    float3 lit = skyAmbient * albedo * (1.0f - roughness * 0.18f);
-    float3 ambientF0 = lerp(float3(0.026f, 0.026f, 0.026f), float3(0.045f, 0.045f, 0.045f), smoothness * 0.45f);
-    float viewFacing = saturate(dot(normal, V));
-    float3 ambientSpecular = FresnelSchlick(viewFacing, ambientF0) * lerp(0.006f, 0.032f, smoothness) * lerp(0.50f, 0.92f, upFactor);
-    ambientSpecular *= lerp(0.55f, 1.0f, viewFacing);
-    lit += ambientSpecular;
-    lit += albedo * 0.030f;
+    float NdotV = saturate(dot(normal, V));
+    float3 F0 = lerp(0.04f.xxx, albedo, metallic);
+    float3 kS = FresnelSchlickRoughness(NdotV, F0, roughness);
+    float3 kD = (1.0f.xxx - kS) * (1.0f - metallic);
+    float3 irradiance = IrradianceMap.SampleLevel(ShadowMaskSampler, normal, 0.0f).rgb * AmbientColor.rgb;
+    float3 ambientDiffuse = irradiance * albedo * kD;
+    float3 R = reflect(-V, normal);
+    float reflectionMip = roughness * IblParams.x;
+    float3 reflectionEnv = PrefilteredEnvMap.SampleLevel(ShadowMaskSampler, R, reflectionMip).rgb;
+    float2 brdf = BrdfIntegrationMap.SampleLevel(
+        ShadowMaskSampler,
+        float2(saturate(NdotV), roughness),
+        0.0f).rg;
+    float3 ambientSpecular = reflectionEnv * (kS * brdf.x + brdf.y);
+    float sunReflection = pow(saturate(dot(R, normalize(-LightDirection.xyz))), lerp(96.0f, 8.0f, roughness));
+    ambientSpecular += LightColor.rgb * LightColor.a * sunReflection * kS * (1.0f - roughness * 0.5f);
+    float3 lit = ambientDiffuse + ambientSpecular;
 
     float3 directionalL = normalize(-LightDirection.xyz);
     float3 directionalRadiance = LightColor.rgb * LightColor.a;
     const float directionalShadow = ComputeShadow(worldPos, normal, directionalL);
-    lit += EvaluateLight(albedo, roughness, normal, V, directionalL, directionalRadiance) * directionalShadow;
+    lit += EvaluateLight(albedo, roughness, metallic, normal, V, directionalL, directionalRadiance) * directionalShadow;
 
     const int pointCount = (int)LightCounts.x;
     const int spotCount = (int)LightCounts.y;
@@ -256,8 +293,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         float falloff = 1.0f - normalizedDist * normalizedDist;
         float attenuation = falloff * falloff;
         float3 L = toLight / max(dist, 0.0001f);
-        float3 radiance = PointLightColorIntensity[i].rgb * (PointLightColorIntensity[i].a * attenuation);
-        lit += EvaluateLight(albedo, roughness, normal, V, L, radiance);
+        float localAttenuation = attenuation / (1.0f + dist * dist * 0.00012f);
+        float3 radiance = PointLightColorIntensity[i].rgb * (PointLightColorIntensity[i].a * localAttenuation);
+        lit += EvaluateLight(albedo, roughness, metallic, normal, V, L, radiance);
     }
 
     [loop]
@@ -277,11 +315,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         float innerConeCos = lerp(outerConeCos, 1.0f, 0.14f);
         float coneFactor = dot(-L, spotDir);
         float spotAmount = smoothstep(outerConeCos, innerConeCos, coneFactor);
-        spotAmount = lerp(0.35f, 1.0f, spotAmount);
         spotAmount *= spotAmount;
 
-        float3 radiance = SpotLightColorIntensity[i].rgb * (SpotLightColorIntensity[i].a * attenuation * spotAmount);
-        lit += EvaluateLight(albedo, roughness, normal, V, L, radiance);
+        float localAttenuation = attenuation / (1.0f + dist * dist * 0.00010f);
+        float3 radiance = SpotLightColorIntensity[i].rgb * (SpotLightColorIntensity[i].a * localAttenuation * spotAmount);
+        lit += EvaluateLight(albedo, roughness, metallic, normal, V, L, radiance);
     }
 
     const float shadowAmount = saturate(1.0f - directionalShadow);
@@ -289,7 +327,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float maskSample = ShadowMaskTex.Sample(ShadowMaskSampler, maskUv).a;
     const float shadowPattern = shadowAmount * saturate(maskSample * 1.35f);
 
-    lit *= lerp(0.28f, 1.0f, directionalShadow);
+    lit *= lerp(0.40f, 1.0f, directionalShadow);
     lit *= 1.0f - shadowPattern * 0.65f;
     lit *= sceneColorScale;
 
