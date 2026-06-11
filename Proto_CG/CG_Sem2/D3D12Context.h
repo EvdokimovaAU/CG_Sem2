@@ -50,6 +50,7 @@ struct MeshData
     BoundingBox BoundsLocal{};
     UINT DiffuseSrvIndex = UINT_MAX;
     UINT NormalSrvIndex = UINT_MAX;
+    UINT RoughnessSrvIndex = UINT_MAX;
 };
 
 struct SceneObject
@@ -83,7 +84,8 @@ public:
         HighPlane,
         Sponza,
         HighPolyDisplacement,
-        ChickenField
+        ChickenField,
+        CerberusPbr
     };
 
     void SetTime(float t);

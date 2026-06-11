@@ -25,6 +25,7 @@ private:
     bool m_scene1WasDown = false;
     bool m_scene2WasDown = false;
     bool m_scene3WasDown = false;
+    bool m_scene4WasDown = false;
     bool m_toggleFrustumWasDown = false;
     bool m_toggleOctreeWasDown = false;
 };

@@ -63,6 +63,7 @@ int Application::Run()
         const bool scene1Down = m_input.IsKeyDown('1');
         const bool scene2Down = m_input.IsKeyDown('2');
         const bool scene3Down = m_input.IsKeyDown('3');
+        const bool scene4Down = m_input.IsKeyDown('4');
         const bool toggleFrustumDown = m_input.IsKeyDown('Q');
         const bool toggleOctreeDown = m_input.IsKeyDown('E');
 
@@ -81,6 +82,11 @@ int Application::Run()
             m_renderingSystem.LoadScene(RenderingSystem::Scene::ChickenField);
         }
 
+        if (scene4Down && !m_scene4WasDown)
+        {
+            m_renderingSystem.LoadScene(RenderingSystem::Scene::CerberusPbr);
+        }
+
         if (toggleFrustumDown && !m_toggleFrustumWasDown)
         {
             const bool enabled = m_renderingSystem.IsFrustumCullingEnabled();
@@ -96,6 +102,7 @@ int Application::Run()
         m_scene1WasDown = scene1Down;
         m_scene2WasDown = scene2Down;
         m_scene3WasDown = scene3Down;
+        m_scene4WasDown = scene4Down;
         m_toggleFrustumWasDown = toggleFrustumDown;
         m_toggleOctreeWasDown = toggleOctreeDown;
 

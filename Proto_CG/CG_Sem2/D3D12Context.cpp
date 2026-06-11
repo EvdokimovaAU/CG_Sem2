@@ -159,16 +159,22 @@ bool D3D12Context::LoadScene(Scene scene)
     char* lastSlash = strrchr(exeDirA, '\\');
     if (lastSlash) *(lastSlash + 1) = '\0';
     const fs::path modelsDir = fs::path(exeDirA) / "models";
+    const fs::path woodRootDir =
+        fs::path(exeDirA) / "Stuff" / "PBR models" / "wood_root";
+    const fs::path cerberusDir =
+        fs::path(exeDirA) / "Stuff" / "PBR models" / "Cerberus_by_Andrew_Maximov";
 
     const bool isHighPlaneScene = (scene == Scene::HighPlane || scene == Scene::HighPolyDisplacement);
     const bool isCrowdScene = (scene == Scene::ChickenField);
     const bool isDisplacementScene = (scene == Scene::HighPolyDisplacement);
+    const bool isCerberusScene = (scene == Scene::CerberusPbr);
     const bool useDisplacement = isHighPlaneScene;
-    const fs::path objPath = modelsDir / (
-        isCrowdScene ? "Dracula-bl.obj" :
-        (isHighPlaneScene ? "high plane.obj" :
-            (scene == Scene::HighPlane ? "high plane.obj" : "sponza.obj")));
-    const std::string mtlDir = modelsDir.string();
+    const fs::path objPath = isCerberusScene
+        ? (woodRootDir / "wood_root.obj")
+        : (modelsDir / (
+            isCrowdScene ? "Dracula-bl.obj" :
+            (isHighPlaneScene ? "high plane.obj" : "sponza.obj")));
+    const std::string mtlDir = (isCerberusScene ? woodRootDir : modelsDir).string();
 
     m_vertexBuffer.Reset();
     m_indexBuffer.Reset();
@@ -342,6 +348,80 @@ bool D3D12Context::LoadScene(Scene scene)
             m_normalMapSrvIndex = m_lodMeshes.front().NormalSrvIndex;
         }
     }
+    else if (isCerberusScene)
+    {
+        m_sceneMeshes.clear();
+
+        auto loadPbrSceneMesh = [&](const fs::path& sceneObjPath,
+            const fs::path& sceneMtlDir,
+            const fs::path& sceneTextureDir,
+            const char* albedoFile,
+            const char* normalFile,
+            const char* roughnessFile,
+            UINT diffuseSlot,
+            UINT normalSlot,
+            UINT roughnessSlot) -> bool
+        {
+            if (!LoadModelFromOBJ(sceneObjPath.string().c_str(), sceneMtlDir.string().c_str()))
+            {
+                return false;
+            }
+
+            MeshData mesh = CaptureCurrentMesh();
+            const std::string texturesDir = sceneTextureDir.string();
+
+            mesh.DiffuseSrvIndex = 0;
+            if (CreateTextureFromFile((texturesDir + "\\" + albedoFile).c_str(), diffuseSlot))
+            {
+                mesh.DiffuseSrvIndex = diffuseSlot;
+                for (auto& sm : mesh.Submeshes)
+                {
+                    sm.SrvIndex = mesh.DiffuseSrvIndex;
+                }
+            }
+
+            mesh.NormalSrvIndex = 0;
+            if (CreateTextureFromFile((texturesDir + "\\" + normalFile).c_str(), normalSlot))
+            {
+                mesh.NormalSrvIndex = normalSlot;
+            }
+
+            mesh.RoughnessSrvIndex = 0;
+            if (CreateTextureFromFile((texturesDir + "\\" + roughnessFile).c_str(), roughnessSlot))
+            {
+                mesh.RoughnessSrvIndex = roughnessSlot;
+            }
+
+            m_sceneMeshes.push_back(mesh);
+            return true;
+        };
+
+        modelLoaded =
+            loadPbrSceneMesh(
+                woodRootDir / "wood_root.obj",
+                woodRootDir,
+                woodRootDir,
+                "Aset_wood_root_M_rkswd_2K_Albedo.jpg",
+                "Aset_wood_root_M_rkswd_2K_Normal_LOD0.jpg",
+                "Aset_wood_root_M_rkswd_2K_Roughness.jpg",
+                119u, 121u, 122u) &&
+            loadPbrSceneMesh(
+                cerberusDir / "Cerberus_LP.obj",
+                cerberusDir,
+                cerberusDir / "Textures",
+                "Cerberus_A.jpg",
+                "Cerberus_N.jpg",
+                "Cerberus_R.jpg",
+                110u, 111u, 112u);
+
+        if (modelLoaded && !m_sceneMeshes.empty())
+        {
+            ApplyMesh(m_sceneMeshes.front());
+            m_baseColorSrvIndex = m_sceneMeshes.front().DiffuseSrvIndex;
+            m_normalMapSrvIndex = m_sceneMeshes.front().NormalSrvIndex;
+            m_roughnessSrvIndex = m_sceneMeshes.front().RoughnessSrvIndex;
+        }
+    }
     else
     {
         m_sceneMeshes.push_back(CaptureCurrentMesh());
@@ -357,6 +437,13 @@ bool D3D12Context::LoadScene(Scene scene)
         m_cameraDistance = (std::max)(120.0f, (std::max)(sceneExtents.x, sceneExtents.z) * 0.46f);
         m_cameraYaw = 0.52f;
         m_cameraPitch = -0.20f;
+    }
+    else if (m_currentScene == Scene::CerberusPbr)
+    {
+        m_cameraTarget = XMFLOAT3(sceneCenter.x, sceneCenter.y + sceneExtents.y * 0.10f, sceneCenter.z);
+        m_cameraDistance = (std::max)(90.0f, (sceneExtents.x + sceneExtents.y + sceneExtents.z) * 1.15f);
+        m_cameraYaw = 0.32f;
+        m_cameraPitch = -0.24f;
     }
     else
     {
@@ -583,16 +670,82 @@ void D3D12Context::BuildSceneObjects()
         : m_modelBoundsLocal;
     if (m_currentScene != Scene::ChickenField)
     {
+        if (m_currentScene == Scene::CerberusPbr && m_sceneMeshes.size() >= 2)
+        {
+            const float woodScale = 100.0f;
+            const float cerberusScale = 80.0f;
+            const float spacing = 78.0f;
+
+            const MeshData& woodMesh = m_sceneMeshes[0];
+            const MeshData& cerberusMesh = m_sceneMeshes[1];
+
+            const std::array<const MeshData*, 2> meshes = { &woodMesh, &cerberusMesh };
+            const std::array<float, 2> scales = { woodScale, cerberusScale };
+            const std::array<float, 2> offsetsX = { -spacing, spacing };
+
+            XMFLOAT3 sceneMin(
+                (std::numeric_limits<float>::max)(),
+                (std::numeric_limits<float>::max)(),
+                (std::numeric_limits<float>::max)());
+            XMFLOAT3 sceneMax(
+                -(std::numeric_limits<float>::max)(),
+                -(std::numeric_limits<float>::max)(),
+                -(std::numeric_limits<float>::max)());
+
+            for (size_t i = 0; i < meshes.size(); ++i)
+            {
+                const MeshData& mesh = *meshes[i];
+                SceneObject object{};
+                const float scale = scales[i];
+                const BoundingBox& bounds = mesh.BoundsLocal;
+                const float worldY = -bounds.Min.y * scale;
+                XMMATRIX world = XMMatrixScaling(scale, scale, scale) *
+                    XMMatrixTranslation(offsetsX[i], worldY, 0.0f);
+                XMStoreFloat4x4(&object.World, world);
+                object.BoundsLocal = bounds;
+                object.BoundsWorld = TransformBoundingBox(bounds, object.World);
+                object.DiffuseSrvIndex = mesh.DiffuseSrvIndex;
+                object.MeshIndex = static_cast<UINT>(i);
+                object.Visible = true;
+                m_sceneObjects.push_back(object);
+
+                sceneMin.x = (std::min)(sceneMin.x, object.BoundsWorld.Min.x);
+                sceneMin.y = (std::min)(sceneMin.y, object.BoundsWorld.Min.y);
+                sceneMin.z = (std::min)(sceneMin.z, object.BoundsWorld.Min.z);
+                sceneMax.x = (std::max)(sceneMax.x, object.BoundsWorld.Max.x);
+                sceneMax.y = (std::max)(sceneMax.y, object.BoundsWorld.Max.y);
+                sceneMax.z = (std::max)(sceneMax.z, object.BoundsWorld.Max.z);
+            }
+
+            m_sceneBoundsMin = sceneMin;
+            m_sceneBoundsMax = sceneMax;
+            return;
+        }
+
         SceneObject object{};
-        object.World = MakeIdentityMatrix();
+        if (m_currentScene == Scene::CerberusPbr)
+        {
+            const float cerberusScale = 100.0f;
+            const float worldY = -localBounds.Min.y * cerberusScale;
+            XMMATRIX world = XMMatrixScaling(cerberusScale, cerberusScale, cerberusScale) *
+                XMMatrixTranslation(0.0f, worldY, 0.0f);
+            XMStoreFloat4x4(&object.World, world);
+            object.BoundsWorld = TransformBoundingBox(localBounds, object.World);
+            m_sceneBoundsMin = object.BoundsWorld.Min;
+            m_sceneBoundsMax = object.BoundsWorld.Max;
+        }
+        else
+        {
+            object.World = MakeIdentityMatrix();
+            object.BoundsWorld = localBounds;
+            m_sceneBoundsMin = localBounds.Min;
+            m_sceneBoundsMax = localBounds.Max;
+        }
         object.BoundsLocal = localBounds;
-        object.BoundsWorld = localBounds;
         object.DiffuseSrvIndex = UINT_MAX;
         object.MeshIndex = 0;
         object.Visible = true;
         m_sceneObjects.push_back(object);
-        m_sceneBoundsMin = localBounds.Min;
-        m_sceneBoundsMax = localBounds.Max;
 
         return;
     }
@@ -977,6 +1130,7 @@ MeshData D3D12Context::CaptureCurrentMesh() const
     mesh.BoundsLocal = m_modelBoundsLocal;
     mesh.DiffuseSrvIndex = UINT_MAX;
     mesh.NormalSrvIndex = UINT_MAX;
+    mesh.RoughnessSrvIndex = UINT_MAX;
     return mesh;
 }
 
@@ -990,6 +1144,7 @@ void D3D12Context::ApplyMesh(const MeshData& mesh)
     m_use32BitIndices = mesh.Use32BitIndices;
     m_submeshes = mesh.Submeshes;
     m_modelBoundsLocal = mesh.BoundsLocal;
+    m_roughnessSrvIndex = mesh.RoughnessSrvIndex;
 }
 
 UINT D3D12Context::SelectCrowdLodIndex(const SceneObject& object) const
@@ -2472,10 +2627,6 @@ void D3D12Context::DrawSceneGeometry(
         commandList->SetGraphicsRootDescriptorTable(displacementRootParameterIndex, displacementHandle);
     }
 
-    D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
-    roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
-    commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
-
     const auto bindMesh = [&](const MeshData& mesh)
     {
         commandList->IASetVertexBuffers(0, 1, &mesh.VbView);
@@ -2512,6 +2663,9 @@ void D3D12Context::DrawSceneGeometry(
         D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
         normalMapHandle.ptr += SIZE_T(m_normalMapSrvIndex) * SIZE_T(m_srvDescriptorSize);
         commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
+        roughnessHandle.ptr += SIZE_T(m_roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
+        commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
         const MeshData mesh = CaptureCurrentMesh();
         drawSubmeshes(mesh, UINT_MAX);
         return;
@@ -2532,9 +2686,13 @@ void D3D12Context::DrawSceneGeometry(
             UpdateCB(object.World, objectIndex, lodIndex);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
             const UINT normalSrvIndex = (mesh.NormalSrvIndex == UINT_MAX) ? m_normalMapSrvIndex : mesh.NormalSrvIndex;
+            const UINT roughnessSrvIndex = (mesh.RoughnessSrvIndex == UINT_MAX) ? m_roughnessSrvIndex : mesh.RoughnessSrvIndex;
             D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
             normalMapHandle.ptr += SIZE_T(normalSrvIndex) * SIZE_T(m_srvDescriptorSize);
             commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+            D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
+            roughnessHandle.ptr += SIZE_T(roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
+            commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
             bindMesh(mesh);
             drawSubmeshes(mesh, object.DiffuseSrvIndex);
         }
@@ -2546,9 +2704,13 @@ void D3D12Context::DrawSceneGeometry(
             UpdateCB(object.World, objectIndex, 0);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(objectIndex));
             const UINT normalSrvIndex = (mesh.NormalSrvIndex == UINT_MAX) ? m_normalMapSrvIndex : mesh.NormalSrvIndex;
+            const UINT roughnessSrvIndex = (mesh.RoughnessSrvIndex == UINT_MAX) ? m_roughnessSrvIndex : mesh.RoughnessSrvIndex;
             D3D12_GPU_DESCRIPTOR_HANDLE normalMapHandle = baseGpu;
             normalMapHandle.ptr += SIZE_T(normalSrvIndex) * SIZE_T(m_srvDescriptorSize);
             commandList->SetGraphicsRootDescriptorTable(3, normalMapHandle);
+            D3D12_GPU_DESCRIPTOR_HANDLE roughnessHandle = baseGpu;
+            roughnessHandle.ptr += SIZE_T(roughnessSrvIndex) * SIZE_T(m_srvDescriptorSize);
+            commandList->SetGraphicsRootDescriptorTable(4, roughnessHandle);
             bindMesh(mesh);
             drawSubmeshes(mesh, object.DiffuseSrvIndex);
         }
