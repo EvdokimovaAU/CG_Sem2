@@ -383,6 +383,17 @@ bool RenderingSystem::IsOctreeEnabled() const
     return m_context.IsOctreeEnabled();
 }
 
+void RenderingSystem::SetUseGgxDistribution(bool enabled)
+{
+    m_useGgxDistribution = enabled;
+    m_context.SetUseGgxDistribution(enabled);
+}
+
+bool RenderingSystem::IsUsingGgxDistribution() const
+{
+    return m_useGgxDistribution;
+}
+
 void RenderingSystem::SetClearColor(float r, float g, float b, float a)
 {
     m_clearColor[0] = r;
@@ -4363,6 +4374,7 @@ void RenderingSystem::UpdateLightingConstants()
     XMStoreFloat4x4(&cb.InvProj, XMMatrixTranspose(invProj));
     const UINT prefilteredMipCount = (m_prefilteredEnvMap != nullptr) ? m_prefilteredEnvMap->GetDesc().MipLevels : 1u;
     cb.IblParams = XMFLOAT4(static_cast<float>((std::max)(int(prefilteredMipCount) - 1, 0)), 0.0f, 0.0f, 0.0f);
+    cb.BrdfParams = XMFLOAT4(m_useGgxDistribution ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 
     std::memcpy(m_deferredLightCBMappedData, &cb, sizeof(cb));
 }

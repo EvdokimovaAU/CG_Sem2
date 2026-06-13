@@ -1264,7 +1264,7 @@ void D3D12Context::UpdateCBWithMatrices(
         normalMapStrength = 0.0f;
     }
 
-    m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, normalMapStrength, 0.0f);
+    m_cbData.TimeParams = XMFLOAT4(m_time, lodFilterStrength, normalMapStrength, m_useGgxDistribution ? 1.0f : 0.0f);
     if (m_currentScene == Scene::HighPlane || m_currentScene == Scene::HighPolyDisplacement)
     {
         m_cbData.TessellationParams = shadowPass
@@ -2927,6 +2927,16 @@ void D3D12Context::SetUVTiling(float x, float y)
 void D3D12Context::SetUVScrollSpeed(float uSpeed, float vSpeed)
 {
     m_uvScrollSpeed = { uSpeed, vSpeed };
+}
+
+void D3D12Context::SetUseGgxDistribution(bool enabled)
+{
+    m_useGgxDistribution = enabled;
+}
+
+bool D3D12Context::IsUsingGgxDistribution() const
+{
+    return m_useGgxDistribution;
 }
 
 

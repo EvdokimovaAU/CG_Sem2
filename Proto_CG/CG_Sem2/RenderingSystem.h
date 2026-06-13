@@ -32,6 +32,8 @@ public:
     bool IsFrustumCullingEnabled() const;
     void SetOctreeEnabled(bool enabled);
     bool IsOctreeEnabled() const;
+    void SetUseGgxDistribution(bool enabled);
+    bool IsUsingGgxDistribution() const;
 
     void SetClearColor(float r, float g, float b, float a);
     void SetTime(float timeSeconds);
@@ -138,6 +140,7 @@ private:
         DirectX::XMFLOAT4X4 InvView;
         DirectX::XMFLOAT4X4 InvProj;
         DirectX::XMFLOAT4 IblParams;
+        DirectX::XMFLOAT4 BrdfParams;
     };
 
     struct WaterCB
@@ -194,6 +197,7 @@ private:
     D3D12Context m_context;
     GBuffer m_gbuffer;
     Technique m_technique = Technique::Forward;
+    bool m_useGgxDistribution = true;
     float m_clearColor[4] = { 0.48f, 0.52f, 0.80f, 1.0f };
     UINT m_width = 0;
     UINT m_height = 0;

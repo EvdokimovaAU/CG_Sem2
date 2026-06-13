@@ -66,6 +66,7 @@ int Application::Run()
         const bool scene4Down = m_input.IsKeyDown('4');
         const bool toggleFrustumDown = m_input.IsKeyDown('Q');
         const bool toggleOctreeDown = m_input.IsKeyDown('E');
+        const bool toggleBrdfDown = m_input.IsKeyDown('R');
 
         if (scene1Down && !m_scene1WasDown)
         {
@@ -99,12 +100,19 @@ int Application::Run()
             m_renderingSystem.SetOctreeEnabled(!enabled);
         }
 
+        if (toggleBrdfDown && !m_toggleBrdfWasDown)
+        {
+            const bool useGgx = m_renderingSystem.IsUsingGgxDistribution();
+            m_renderingSystem.SetUseGgxDistribution(!useGgx);
+        }
+
         m_scene1WasDown = scene1Down;
         m_scene2WasDown = scene2Down;
         m_scene3WasDown = scene3Down;
         m_scene4WasDown = scene4Down;
         m_toggleFrustumWasDown = toggleFrustumDown;
         m_toggleOctreeWasDown = toggleOctreeDown;
+        m_toggleBrdfWasDown = toggleBrdfDown;
 
         m_timer.Tick();
         float deltaTime = m_timer.DeltaTime();

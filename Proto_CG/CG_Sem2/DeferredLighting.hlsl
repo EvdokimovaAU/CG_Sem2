@@ -18,6 +18,7 @@ cbuffer DeferredLightCB : register(b0)
     float4x4 InvView;
     float4x4 InvProj;
     float4 IblParams;
+    float4 BrdfParams;
 };
 
 #define POST_PROCESS_DEBUG_MODE 0
@@ -75,6 +76,23 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     // формула GGX
     float denom = NdotH2 * (a2 - 1.0f) + 1.0f; 
     return a2 / max(3.14159265f * denom * denom, 0.0001f);
+}
+
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    float a = max(roughness * roughness, 0.001f);
+    float a2 = a * a;
+    float NdotH = saturate(dot(N, H));
+    float NdotH2 = max(NdotH * NdotH, 0.0001f);
+    float tanTheta2 = max((1.0f - NdotH2) / NdotH2, 0.0f);
+    return exp(-tanTheta2 / a2) / max(3.14159265f * a2 * NdotH2 * NdotH2, 0.0001f);
+}
+
+float DistributionMicrofacet(float3 N, float3 H, float roughness)
+{
+    return (BrdfParams.x >= 0.5f)
+        ? DistributionGGX(N, H, roughness)
+        : DistributionBeckmann(N, H, roughness);
 }
 
 // Самозатемнение микрофастетов (G)
@@ -211,7 +229,7 @@ float3 EvaluateLight(
     float clampedRoughness = clamp(roughness, 0.045f, 1.0f);
     float3 F0 = lerp(0.04f.xxx, albedo, metallic);
     float3 F = FresnelSchlick(HdotV, F0);
-    float D = DistributionGGX(N, H, clampedRoughness);
+    float D = DistributionMicrofacet(N, H, clampedRoughness);
     float G = GeometrySmith(N, V, L, clampedRoughness);
 
     float3 numerator = D * G * F;

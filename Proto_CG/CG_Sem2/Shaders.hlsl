@@ -139,6 +139,23 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     return a2 / max(3.14159265f * denom * denom, 0.0001f);
 }
 
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    float a = max(roughness * roughness, 0.001f);
+    float a2 = a * a;
+    float NdotH = saturate(dot(N, H));
+    float NdotH2 = max(NdotH * NdotH, 0.0001f);
+    float tanTheta2 = max((1.0f - NdotH2) / NdotH2, 0.0f);
+    return exp(-tanTheta2 / a2) / max(3.14159265f * a2 * NdotH2 * NdotH2, 0.0001f);
+}
+
+float DistributionMicrofacet(float3 N, float3 H, float roughness)
+{
+    return (TimeParams.w >= 0.5f)
+        ? DistributionGGX(N, H, roughness)
+        : DistributionBeckmann(N, H, roughness);
+}
+
 float GeometrySchlickGGX(float NdotV, float roughness)
 {
     float r = roughness + 1.0f;
@@ -240,7 +257,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float VdotH = saturate(dot(V, H));
     float3 F0 = lerp(0.04f.xxx, albedo.rgb, metallic);
     float3 F = FresnelSchlick(VdotH, F0);
-    float D = DistributionGGX(N, H, roughness);
+    float D = DistributionMicrofacet(N, H, roughness);
     float G = GeometrySmith(N, V, L, roughness);
     float3 specular = (D * G * F) / max(4.0f * NdotV * ndotl, 0.0001f);
     float3 kD = (1.0f.xxx - F) * (1.0f - metallic);

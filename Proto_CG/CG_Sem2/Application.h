@@ -28,4 +28,5 @@ private:
     bool m_scene4WasDown = false;
     bool m_toggleFrustumWasDown = false;
     bool m_toggleOctreeWasDown = false;
+    bool m_toggleBrdfWasDown = false;
 };

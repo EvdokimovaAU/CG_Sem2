@@ -99,6 +99,8 @@ public:
     bool IsFrustumCullingEnabled() const;
     void SetOctreeEnabled(bool enabled);
     bool IsOctreeEnabled() const;
+    void SetUseGgxDistribution(bool enabled);
+    bool IsUsingGgxDistribution() const;
 
     void Render(float r, float g, float b, float a);
     void SetRotation(float t);
@@ -270,6 +272,7 @@ private:
     Scene m_currentScene = Scene::HighPlane;
     bool m_frustumCullingEnabled = true;
     bool m_octreeEnabled = true;
+    bool m_useGgxDistribution = true;
     std::vector<OctreeNode> m_octreeNodes;
     int m_octreeRoot = -1;
     static constexpr UINT OctreeMaxDepth = 6;
