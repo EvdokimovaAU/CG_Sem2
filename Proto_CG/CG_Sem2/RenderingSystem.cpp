@@ -1371,6 +1371,7 @@ bool RenderingSystem::CreateHdrResources()
     return true;
 }
 
+// Irradiance Map для рассеивания
 bool RenderingSystem::CreateIrradianceMapResource()
 {
     ID3D12Device* device = m_context.GetDevice();
@@ -1430,6 +1431,7 @@ bool RenderingSystem::CreateIrradianceMapResource()
     const DDS_HEADER_DXT10* dxt10Header =
         reinterpret_cast<const DDS_HEADER_DXT10*>(ddsData.data() + sizeof(UINT) + sizeof(DDS_HEADER));
 
+    // проверка cubemap
     if (dxt10Header->resourceDimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
         (dxt10Header->miscFlag & DDS_RESOURCE_MISC_TEXTURECUBE) == 0 ||
         (header->caps2 & DDSCAPS2_CUBEMAP) == 0 ||
@@ -1524,7 +1526,8 @@ bool RenderingSystem::CreateIrradianceMapResource()
     {
         return false;
     }
-
+    
+    // копирование данных в текстуру
     size_t dataOffset = sizeof(UINT) + sizeof(DDS_HEADER) + sizeof(DDS_HEADER_DXT10);
     for (UINT face = 0; face < faceCount; ++face)
     {
@@ -1578,6 +1581,7 @@ bool RenderingSystem::CreateIrradianceMapResource()
         commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
 
+    // перевод в пиксельный шейдр
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = m_irradianceMap.Get();

@@ -65,23 +65,28 @@ float3 GetCameraPositionWS()
     return mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvView).xyz;
 }
 
+// Распределение микрофасетов (D)
 float DistributionGGX(float3 N, float3 H, float roughness)
 {
     float a = roughness * roughness;
     float a2 = a * a;
     float NdotH = saturate(dot(N, H));
     float NdotH2 = NdotH * NdotH;
-    float denom = NdotH2 * (a2 - 1.0f) + 1.0f;
+    // формула GGX
+    float denom = NdotH2 * (a2 - 1.0f) + 1.0f; 
     return a2 / max(3.14159265f * denom * denom, 0.0001f);
 }
 
+// Самозатемнение микрофастетов (G)
 float GeometrySchlickGGX(float NdotV, float roughness)
 {
     float r = roughness + 1.0f;
     float k = (r * r) / 8.0f;
+    // формула
     return NdotV / max(NdotV * (1.0f - k) + k, 0.0001f);
 }
 
+// Полная фуекция G 
 float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 {
     float NdotV = saturate(dot(N, V));
@@ -91,11 +96,13 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
     return ggxV * ggxL;
 }
 
+// формула Шлика (F)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
 }
 
+// зафисимость эфекта от поверхности
 float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
 {
     return F0 + (max(1.0f.xxx - roughness.xxx, F0) - F0) * pow(1.0f - cosTheta, 5.0f);
@@ -181,6 +188,7 @@ float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
     return foundCascade ? bestVisibility : 1.0f;
 }
 
+// BRDF для света
 float3 EvaluateLight(
     float3 albedo,
     float roughness,
@@ -244,8 +252,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float depthVis = saturate(pow(depth, 0.35f));
     return float4(depthVis, depthVis, depthVis, 1.0f);
 #endif
-
+    
+    // рассевание через irradiance map
     float3 cameraPos = GetCameraPositionWS();
+    // отражение через prefilteredEnvMap
     float3 V = normalize(cameraPos - worldPos);
 
     const float sceneColorScale = AmbientColor.a;
@@ -257,6 +267,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 ambientDiffuse = irradiance * albedo * kD;
     float3 R = reflect(-V, normal);
     float reflectionMip = roughness * IblParams.x;
+    // рассеивание + отражение
     float3 reflectionEnv = PrefilteredEnvMap.SampleLevel(ShadowMaskSampler, R, reflectionMip).rgb;
     float2 brdf = BrdfIntegrationMap.SampleLevel(
         ShadowMaskSampler,
