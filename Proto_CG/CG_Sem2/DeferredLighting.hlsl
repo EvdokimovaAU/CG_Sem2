@@ -142,9 +142,7 @@ float3 SampleSkyColor(float3 dir)
 float ComputeShadow(float3 worldPos, float3 normal, float3 lightDir)
 {
     const bool useStaticShadowSelection = ShadowParams.x > 0.5f;
-    const float bias = useStaticShadowSelection
-        ? ShadowParams.z
-        : (ShadowParams.z + (1.0f - saturate(dot(normal, lightDir))) * ShadowParams.w);
+    const float bias = ShadowParams.z + (1.0f - saturate(dot(normal, lightDir))) * ShadowParams.w;
     const float texelSize = ShadowParams.y;
     const float viewDepth = mul(float4(worldPos, 1.0f), View).z;
     uint startCascadeIndex = 0;

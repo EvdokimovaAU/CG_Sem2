@@ -436,9 +436,9 @@ void RenderingSystem::UpdateCameraOrbit(
         mouseDeltaY);
 }
 
-void RenderingSystem::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed)
+void RenderingSystem::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed, float verticalInput)
 {
-    m_context.UpdateCameraMove(deltaTime, forwardInput, strafeInput, moveSpeed);
+    m_context.UpdateCameraMove(deltaTime, forwardInput, strafeInput, moveSpeed, verticalInput);
 }
 
 // выбирает способ отрисовки
@@ -538,7 +538,8 @@ void RenderingSystem::RenderShadowStage()
             commandList,
             1,
             identity,
-            lightViewProjFloat);
+            lightViewProjFloat,
+            cascadeIndex);
     }
 
     if (m_shadowMapState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
@@ -677,6 +678,7 @@ void RenderingSystem::RenderPostProcessStage()
 
     commandList->SetPipelineState(m_postProcessPSO.Get());
     commandList->SetGraphicsRootSignature(m_postProcessRootSignature.Get());
+    commandList->SetGraphicsRoot32BitConstant(1, m_context.GetCurrentScene() == Scene::Terrain ? 1u : 0u, 0);
 
     ID3D12DescriptorHeap* heaps[] = { m_postProcessSrvHeap.Get() };
     commandList->SetDescriptorHeaps(1, heaps);
@@ -2300,9 +2302,14 @@ bool RenderingSystem::CreatePostProcessRootSignature()
     sampler.ShaderRegister = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    D3D12_ROOT_PARAMETER params[2] = { rootParam, {} };
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants.ShaderRegister = 0;
+    params[1].Constants.Num32BitValues = 1;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_ROOT_SIGNATURE_DESC desc{};
-    desc.NumParameters = 1;
-    desc.pParameters = &rootParam;
+    desc.NumParameters = 2;
+    desc.pParameters = params;
     desc.NumStaticSamplers = 1;
     desc.pStaticSamplers = &sampler;
     desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -4604,6 +4611,11 @@ void RenderingSystem::UpdateShadowMatrices(DeferredLightCB& cb) const
         1.0f / static_cast<float>(ShadowMapResolution),
         useStaticShadowCascades ? 0.00028f : 0.00055f,
         useStaticShadowCascades ? 0.0f : 0.0035f);
+    if (m_context.GetCurrentScene() == Scene::Terrain)
+    {
+        cb.ShadowParams.z = 0.0006f;
+        cb.ShadowParams.w = 0.0015f;
+    }
 }
 
 

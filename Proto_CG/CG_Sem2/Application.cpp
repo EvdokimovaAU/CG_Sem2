@@ -1,5 +1,7 @@
 #include "Application.h"
 #include <windows.h>
+#include <algorithm>
+#include <cwchar>
 
 Application::Application(HINSTANCE hInstance, int nCmdShow)
     : m_hInstance(hInstance), m_nCmdShow(nCmdShow)
@@ -64,6 +66,7 @@ int Application::Run()
         const bool scene2Down = m_input.IsKeyDown('2');
         const bool scene3Down = m_input.IsKeyDown('3');
         const bool scene4Down = m_input.IsKeyDown('4');
+        const bool scene5Down = m_input.IsKeyDown('5');
         const bool toggleFrustumDown = m_input.IsKeyDown('Q');
         const bool toggleOctreeDown = m_input.IsKeyDown('E');
         const bool toggleBrdfDown = m_input.IsKeyDown('R');
@@ -88,6 +91,56 @@ int Application::Run()
             m_renderingSystem.LoadScene(RenderingSystem::Scene::CerberusPbr);
         }
 
+        if (scene5Down && !m_scene5WasDown)
+        {
+            m_selectedTerrainTile = 0;
+            if (!m_renderingSystem.LoadScene(RenderingSystem::Scene::Terrain))
+                MessageBoxW(m_window.GetHWND(), L"Cannot load Terrain. Check models/Heightmap.png next to the executable and the debug output.", L"Terrain", MB_OK | MB_ICONERROR);
+        }
+
+        const bool previousTileDown = m_input.IsKeyDown(VK_OEM_4);
+        const bool nextTileDown = m_input.IsKeyDown(VK_OEM_6);
+        const bool toggleTileDown = m_input.IsKeyDown('T');
+        const UINT tileCount = m_renderingSystem.GetTerrainTileCount();
+        const bool lodDown = m_input.IsKeyDown('L');
+        const bool debugDown = m_input.IsKeyDown('V');
+        if (tileCount > 0 && lodDown && !m_toggleTerrainLodWasDown)
+            m_renderingSystem.SetTerrainLodEnabled(!m_renderingSystem.IsTerrainLodEnabled());
+        if (tileCount > 0 && debugDown && !m_toggleTerrainDebugWasDown)
+            m_renderingSystem.SetTerrainLodDebug(!m_renderingSystem.IsTerrainLodDebug());
+        m_toggleTerrainLodWasDown = lodDown;
+        m_toggleTerrainDebugWasDown = debugDown;
+        if (tileCount > 0)
+        {
+            if (previousTileDown && !m_previousTileWasDown)
+                m_selectedTerrainTile = (m_selectedTerrainTile + tileCount - 1) % tileCount;
+            if (nextTileDown && !m_nextTileWasDown)
+                m_selectedTerrainTile = (m_selectedTerrainTile + 1) % tileCount;
+            if (toggleTileDown && !m_toggleTileWasDown)
+                m_renderingSystem.SetTerrainTileEnabled(m_selectedTerrainTile,
+                    !m_renderingSystem.IsTerrainTileEnabled(m_selectedTerrainTile));
+        }
+        if (tileCount > 0 || scene1Down || scene2Down || scene3Down || scene4Down || scene5Down ||
+            previousTileDown || nextTileDown || toggleTileDown)
+        {
+            wchar_t title[256];
+            if (tileCount > 0)
+            {
+                const auto counts = m_renderingSystem.GetTerrainLodCounts();
+                swprintf_s(title, L"Terrain | LOD 0/1/2/3: %u/%u/%u/%u | L: %ls | V: colors | Tile %u/%u %ls [ ] T",
+                    counts[0], counts[1], counts[2], counts[3],
+                    m_renderingSystem.IsTerrainLodEnabled() ? L"AUTO" : L"FINE",
+                    m_selectedTerrainTile + 1, tileCount,
+                    m_renderingSystem.IsTerrainTileEnabled(m_selectedTerrainTile) ? L"ON" : L"OFF");
+            }
+            else
+                swprintf_s(title, L"KG_Laba4 - DX12 Final | Scenes 1-5 (5: Terrain)");
+            SetWindowTextW(m_window.GetHWND(), title);
+        }
+        m_previousTileWasDown = previousTileDown;
+        m_nextTileWasDown = nextTileDown;
+        m_toggleTileWasDown = toggleTileDown;
+
         if (toggleFrustumDown && !m_toggleFrustumWasDown)
         {
             const bool enabled = m_renderingSystem.IsFrustumCullingEnabled();
@@ -110,6 +163,7 @@ int Application::Run()
         m_scene2WasDown = scene2Down;
         m_scene3WasDown = scene3Down;
         m_scene4WasDown = scene4Down;
+        m_scene5WasDown = scene5Down;
         m_toggleFrustumWasDown = toggleFrustumDown;
         m_toggleOctreeWasDown = toggleOctreeDown;
         m_toggleBrdfWasDown = toggleBrdfDown;
@@ -148,7 +202,12 @@ int Application::Run()
             dolly,
             (float)mouseDeltaX,
             (float)mouseDeltaY);
-        m_renderingSystem.UpdateCameraMove(deltaTime, forwardInput, strafeInput, moveSpeed);
+        float verticalInput = 0.0f;
+        const bool terrain = m_renderingSystem.GetCurrentScene() == RenderingSystem::Scene::Terrain;
+        if (terrain && m_input.IsKeyDown(VK_SPACE)) verticalInput += 1.0f;
+        if (terrain && m_input.IsKeyDown(VK_CONTROL)) verticalInput -= 1.0f;
+        const float boost = terrain && m_input.IsKeyDown(VK_SHIFT) ? 3.0f : 1.0f;
+        m_renderingSystem.UpdateCameraMove((std::min)(deltaTime, 0.1f), forwardInput, strafeInput, moveSpeed * boost, verticalInput);
 
         m_renderingSystem.SetTime(m_timer.TotalTime());
         m_renderingSystem.RenderFrame();

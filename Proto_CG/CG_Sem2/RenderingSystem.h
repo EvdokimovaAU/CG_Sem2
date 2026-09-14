@@ -23,6 +23,14 @@ public:
 
     bool Initialize(HWND hwnd, UINT width, UINT height);
     bool LoadScene(Scene scene);
+    UINT GetTerrainTileCount() const { return m_context.GetTerrainTileCount(); }
+    bool IsTerrainTileEnabled(UINT tileIndex) const { return m_context.IsTerrainTileEnabled(tileIndex); }
+    void SetTerrainTileEnabled(UINT tileIndex, bool enabled) { m_context.SetTerrainTileEnabled(tileIndex, enabled); }
+    void SetTerrainLodEnabled(bool enabled) { m_context.SetTerrainLodEnabled(enabled); }
+    bool IsTerrainLodEnabled() const { return m_context.IsTerrainLodEnabled(); }
+    void SetTerrainLodDebug(bool enabled) { m_context.SetTerrainLodDebug(enabled); }
+    bool IsTerrainLodDebug() const { return m_context.IsTerrainLodDebug(); }
+    std::array<UINT, 4> GetTerrainLodCounts() const { return m_context.GetTerrainLodCounts(); }
     void Shutdown();
 
     void SetTechnique(Technique technique);
@@ -48,7 +56,7 @@ public:
         bool dolly,
         float mouseDeltaX,
         float mouseDeltaY);
-    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed);
+    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed, float verticalInput = 0.0f);
 
     void RenderFrame();
 

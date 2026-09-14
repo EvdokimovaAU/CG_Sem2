@@ -29,8 +29,8 @@ void InputDevice::OnMouseMove(int x, int y)
         return;
     }
 
-    m_mouseDeltaX = x - m_lastMouseX;
-    m_mouseDeltaY = y - m_lastMouseY;
+    m_mouseDeltaX += x - m_lastMouseX;
+    m_mouseDeltaY += y - m_lastMouseY;
 
     m_lastMouseX = x;
     m_lastMouseY = y;

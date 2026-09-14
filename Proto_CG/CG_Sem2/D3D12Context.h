@@ -61,6 +61,7 @@ struct SceneObject
     UINT DiffuseSrvIndex = UINT_MAX;
     UINT MeshIndex = 0;
     bool Visible = true;
+    bool Enabled = true;
 };
 
 struct Frustum
@@ -85,7 +86,8 @@ public:
         Sponza,
         HighPolyDisplacement,
         ChickenField,
-        CerberusPbr
+        CerberusPbr,
+        Terrain
     };
 
     void SetTime(float t);
@@ -94,6 +96,14 @@ public:
 
     bool Initialize(HWND hwnd, UINT width, UINT height);
     bool LoadScene(Scene scene);
+    UINT GetTerrainTileCount() const;
+    bool IsTerrainTileEnabled(UINT tileIndex) const;
+    void SetTerrainTileEnabled(UINT tileIndex, bool enabled);
+    void SetTerrainLodEnabled(bool enabled) { m_terrainLodEnabled = enabled; }
+    bool IsTerrainLodEnabled() const { return m_terrainLodEnabled; }
+    void SetTerrainLodDebug(bool enabled) { m_terrainLodDebug = enabled; }
+    bool IsTerrainLodDebug() const { return m_terrainLodDebug; }
+    std::array<UINT, 4> GetTerrainLodCounts() const { return m_terrainLodCounts; }
     void Shutdown();
     void SetFrustumCullingEnabled(bool enabled);
     bool IsFrustumCullingEnabled() const;
@@ -115,7 +125,8 @@ public:
         ID3D12GraphicsCommandList* commandList,
         UINT displacementRootParameterIndex,
         const DirectX::XMFLOAT4X4& viewMatrix,
-        const DirectX::XMFLOAT4X4& projMatrix);
+        const DirectX::XMFLOAT4X4& projMatrix,
+        UINT cascadeIndex = 0);
 
     void UpdateCameraOrbit(
         float deltaTime,
@@ -125,7 +136,7 @@ public:
         bool dolly,
         float mouseDeltaX,
         float mouseDeltaY);
-    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed);
+    void UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed, float verticalInput = 0.0f);
 
     ID3D12Device* GetDevice() const;
     ID3D12GraphicsCommandList* GetCommandList() const;
@@ -158,6 +169,9 @@ private:
     bool CreateRootSignature();
     bool CreatePipelineState();
     bool CreateGeometry();
+    bool CreateTerrainGeometry(const std::vector<unsigned short>& heights, int width, int height);
+    void UpdateTerrainSelection();
+    void SelectTerrainNode(UINT nodeIndex);
     bool LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir);
     bool CreateConstantBuffer();
     bool CompileShaders();
@@ -238,7 +252,8 @@ private:
     UINT m_constantBufferStride = 0;
     static constexpr UINT MaxSceneObjects = 2048;
     static constexpr UINT ShadowPassCBOffset = MaxSceneObjects;
-    static constexpr UINT MaxSceneConstantBufferSlots = MaxSceneObjects * 2;
+    static constexpr UINT SceneShadowCascadeCount = 4;
+    static constexpr UINT MaxSceneConstantBufferSlots = MaxSceneObjects * (1 + SceneShadowCascadeCount);
 
     float m_time = 0.0f;
     float m_rotationT = 0.0f;
@@ -259,6 +274,22 @@ private:
     std::vector<MeshData> m_lodMeshes;
     std::vector<MeshData> m_sceneMeshes;
     std::vector<SceneObject> m_sceneObjects;
+    static constexpr int TerrainGridCells = 1024;
+    static constexpr int TerrainLeafCells = TerrainGridCells / 8;
+    struct TerrainNode
+    {
+        std::array<int, 4> Children = { -1, -1, -1, -1 };
+        UINT Level = 0;
+        int X = 0, Z = 0, Cells = TerrainGridCells;
+        float MaxHeightError = 0.0f;
+        bool Split = false;
+        bool Selected = false;
+    };
+    std::vector<TerrainNode> m_terrainNodes;
+    std::array<bool, 64> m_terrainTilesEnabled{};
+    std::array<UINT, 4> m_terrainLodCounts{};
+    bool m_terrainLodEnabled = true;
+    bool m_terrainLodDebug = false;
     std::vector<std::string> m_materialDiffusePaths;
     std::vector<UINT> m_materialToSrv;
 

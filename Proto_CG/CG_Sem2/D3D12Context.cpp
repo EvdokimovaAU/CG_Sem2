@@ -11,6 +11,7 @@
 #include <limits>
 #include <unordered_map>
 #include <filesystem>
+#include <functional>
 
 #pragma comment(lib,"d3d12.lib")
 #pragma comment(lib,"dxgi.lib")
@@ -159,6 +160,22 @@ bool D3D12Context::LoadScene(Scene scene)
     char* lastSlash = strrchr(exeDirA, '\\');
     if (lastSlash) *(lastSlash + 1) = '\0';
     const fs::path modelsDir = fs::path(exeDirA) / "models";
+    // Decode before releasing the current scene.
+    std::vector<unsigned short> terrainHeights;
+    int terrainWidth = 0, terrainHeight = 0, terrainChannels = 0;
+    if (scene == Scene::Terrain)
+    {
+        const std::string path = (modelsDir / "Heightmap.png").string();
+        stbi_us* pixels = stbi_load_16(path.c_str(), &terrainWidth, &terrainHeight, &terrainChannels, 1);
+        if (!pixels || terrainWidth < 2 || terrainHeight < 2)
+        {
+            OutputDebugStringA(("Terrain: invalid or missing heightmap: " + path + "\n").c_str());
+            stbi_image_free(pixels);
+            return false;
+        }
+        terrainHeights.assign(pixels, pixels + size_t(terrainWidth) * terrainHeight);
+        stbi_image_free(pixels);
+    }
     const fs::path woodRootDir =
         fs::path(exeDirA) / "Stuff" / "PBR models" / "wood_root";
     const fs::path cerberusDir =
@@ -187,6 +204,8 @@ bool D3D12Context::LoadScene(Scene scene)
     m_materialToSrv.clear();
     m_sceneObjects.clear();
     m_octreeNodes.clear();
+    m_terrainNodes.clear();
+    m_terrainLodCounts.fill(0);
     m_octreeRoot = -1;
     m_indexCount = 0;
     m_use32BitIndices = false;
@@ -211,7 +230,18 @@ bool D3D12Context::LoadScene(Scene scene)
         return false;
 
     bool modelLoaded = false;
-    if (isCrowdScene)
+    if (scene == Scene::Terrain)
+    {
+        if (!CreateTerrainGeometry(terrainHeights, terrainWidth, terrainHeight))
+            return false;
+        modelLoaded = true;
+        if (!CreateSolidColorTexture(0xff70977cu, 0))
+            return false;
+        const UINT32 lodColors[] = { 0xff6666eeu, 0xff55cceeu, 0xff66cc66u, 0xffeeaa55u };
+        for (UINT i = 0; i < 4; ++i)
+            if (!CreateSolidColorTexture(lodColors[i], 100 + i)) return false;
+    }
+    else if (isCrowdScene)
     {
         static const std::array<const char*, 3> kCrowdLodFiles =
         {
@@ -422,7 +452,7 @@ bool D3D12Context::LoadScene(Scene scene)
             m_roughnessSrvIndex = m_sceneMeshes.front().RoughnessSrvIndex;
         }
     }
-    else
+    else if (scene != Scene::Terrain)
     {
         m_sceneMeshes.push_back(CaptureCurrentMesh());
     }
@@ -454,6 +484,14 @@ bool D3D12Context::LoadScene(Scene scene)
     }
 
     UpdateCameraOrbit(0.0f, 0.0f, 0.0f, false, false, 0.0f, 0.0f);
+
+    if (scene == Scene::Terrain)
+    {
+        m_cameraPos = XMFLOAT3(0.0f, m_sceneBoundsMax.y + 320.0f, m_sceneBoundsMax.z + 200.0f);
+        m_cameraYaw = 0.0f;
+        m_cameraPitch = -0.45f;
+        UpdateCameraOrbit(0.0f, 0.0f, 0.0f, false, false, 0.0f, 0.0f);
+    }
 
     m_commandList->Close();
     ID3D12CommandList* lists[] = { m_commandList.Get() };
@@ -488,6 +526,24 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
     bool orbitRotate, bool dolly,
     float mouseDeltaX, float mouseDeltaY)
 {
+    if (m_currentScene == Scene::Terrain)
+    {
+        if (orbitRotate)
+        {
+            m_cameraYaw += mouseDeltaX * rotateSpeed;
+            m_cameraPitch = (std::clamp)(m_cameraPitch - mouseDeltaY * rotateSpeed,
+                -XM_PIDIV2 + 0.01f, XM_PIDIV2 - 0.01f);
+        }
+        const XMVECTOR forward = XMVectorSet(
+            -std::sin(m_cameraYaw) * std::cos(m_cameraPitch), std::sin(m_cameraPitch),
+            -std::cos(m_cameraYaw) * std::cos(m_cameraPitch), 0.0f);
+        XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
+        if (dolly)
+            eye = XMVectorSubtract(eye, XMVectorScale(forward, mouseDeltaY * dollySpeed));
+        XMStoreFloat3(&m_cameraPos, eye);
+        XMStoreFloat3(&m_cameraTarget, XMVectorAdd(eye, forward));
+        return;
+    }
     // вращение по орбите
     if (orbitRotate)
     {
@@ -517,9 +573,9 @@ void D3D12Context::UpdateCameraOrbit(float deltaTime,
     XMStoreFloat3(&m_cameraPos, eye);
 }
 
-void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed)
+void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float strafeInput, float moveSpeed, float verticalInput)
 {
-    if (std::abs(forwardInput) <= 1.0e-4f && std::abs(strafeInput) <= 1.0e-4f)
+    if (std::abs(forwardInput) <= 1.0e-4f && std::abs(strafeInput) <= 1.0e-4f && std::abs(verticalInput) <= 1.0e-4f)
     {
         return;
     }
@@ -530,7 +586,7 @@ void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float s
 
     XMVECTOR forward = XMVectorSubtract(target, eye);
 
-    if (m_currentScene != Scene::Sponza)
+    if (m_currentScene != Scene::Sponza && m_currentScene != Scene::Terrain)
     {
         forward = XMVectorSetY(forward, 0.0f);
     }
@@ -548,6 +604,7 @@ void D3D12Context::UpdateCameraMove(float deltaTime, float forwardInput, float s
     XMVECTOR move = XMVectorAdd(
         XMVectorScale(forward, forwardInput),
         XMVectorScale(right, strafeInput));
+    move = XMVectorAdd(move, XMVectorScale(up, verticalInput));
 
     if (XMVectorGetX(XMVector3LengthSq(move)) <= 1.0e-6f)
     {
@@ -622,7 +679,11 @@ void D3D12Context::Render(float r, float g, float b, float a)
     m_commandList->IASetVertexBuffers(0, 1, &m_vbView);
     m_commandList->IASetIndexBuffer(&m_ibView);
 
-    if (!m_submeshes.empty())
+    if (m_currentScene == Scene::Terrain)
+    {
+        DrawSceneGeometry(m_commandList.Get(), 1, 2);
+    }
+    else if (!m_submeshes.empty())
     {
         for (const auto& sm : m_submeshes)
         {
@@ -663,6 +724,22 @@ void D3D12Context::Render(float r, float g, float b, float a)
 void D3D12Context::BuildSceneObjects()
 {
     m_sceneObjects.clear();
+
+    if (m_currentScene == Scene::Terrain)
+    {
+        m_sceneBoundsMin = m_modelBoundsLocal.Min;
+        m_sceneBoundsMax = m_modelBoundsLocal.Max;
+        for (UINT i = 0; i < static_cast<UINT>(m_sceneMeshes.size()); ++i)
+        {
+            SceneObject tile{};
+            tile.World = MakeIdentityMatrix();
+            tile.BoundsLocal = m_sceneMeshes[i].BoundsLocal;
+            tile.BoundsWorld = tile.BoundsLocal;
+            tile.MeshIndex = i;
+            m_sceneObjects.push_back(tile);
+        }
+        return;
+    }
 
     const BoundingBox localBounds =
         (!m_lodMeshes.empty() && m_currentScene == Scene::ChickenField)
@@ -785,7 +862,7 @@ void D3D12Context::BuildSceneObjects()
             object.BoundsWorld = TransformBoundingBox(localBounds, object.World);
             object.DiffuseSrvIndex = UINT_MAX;
             object.MeshIndex = 0;
-            object.Visible = true;
+            object.Visible = object.Enabled;
 
             sceneMin.x = (std::min)(sceneMin.x, object.BoundsWorld.Min.x);
             sceneMin.y = (std::min)(sceneMin.y, object.BoundsWorld.Min.y);
@@ -807,6 +884,15 @@ void D3D12Context::BuildSceneObjects()
 // проверка видимости
 void D3D12Context::UpdateObjectVisibility()
 {
+    if (m_currentScene == Scene::Terrain)
+    {
+        UpdateTerrainSelection();
+        const Frustum frustum = BuildCameraFrustum();
+        for (size_t i = 0; i < m_sceneObjects.size(); ++i)
+            m_sceneObjects[i].Visible = m_terrainNodes[i].Selected &&
+                (!m_frustumCullingEnabled || IntersectsFrustum(m_sceneObjects[i].BoundsWorld, frustum));
+        return;
+    }
     if (m_sceneObjects.empty())
     {
         return;
@@ -816,7 +902,7 @@ void D3D12Context::UpdateObjectVisibility()
     {
         for (SceneObject& object : m_sceneObjects)
         {
-            object.Visible = true;
+            object.Visible = object.Enabled;
         }
         return;
     }
@@ -838,7 +924,7 @@ void D3D12Context::UpdateObjectVisibility()
         {
             if (objectIndex < m_sceneObjects.size())
             {
-                m_sceneObjects[objectIndex].Visible = true;
+                m_sceneObjects[objectIndex].Visible = m_sceneObjects[objectIndex].Enabled;
             }
         }
         return;
@@ -846,7 +932,7 @@ void D3D12Context::UpdateObjectVisibility()
 
     for (SceneObject& object : m_sceneObjects)
     {
-        object.Visible = IntersectsFrustum(object.BoundsWorld, frustum);
+        object.Visible = object.Enabled && IntersectsFrustum(object.BoundsWorld, frustum);
     }
 }
 
@@ -855,6 +941,10 @@ void D3D12Context::BuildOctree()
 {
     m_octreeNodes.clear();
     m_octreeRoot = -1;
+
+    // Terrain has its own quadtree; the generic scene octree is not used for it.
+    if (m_currentScene == Scene::Terrain)
+        return;
 
     if (m_sceneObjects.empty())
     {
@@ -1259,7 +1349,8 @@ void D3D12Context::UpdateCBWithMatrices(
     float normalMapStrength = 1.0f;
     if (m_currentScene == Scene::Sponza ||
         m_currentScene == Scene::HighPlane ||
-        m_currentScene == Scene::HighPolyDisplacement)
+        m_currentScene == Scene::HighPolyDisplacement ||
+        m_currentScene == Scene::Terrain)
     {
         normalMapStrength = 0.0f;
     }
@@ -1278,7 +1369,7 @@ void D3D12Context::UpdateCBWithMatrices(
 
     const UINT safeIndex = (std::min)(objectIndex, MaxSceneConstantBufferSlots - 1);
     std::memcpy(
-        m_cbMappedData + size_t(safeIndex) * size_t(m_constantBufferStride),
+        m_cbMappedData + (size_t(m_frameIndex) * MaxSceneConstantBufferSlots + safeIndex) * size_t(m_constantBufferStride),
         &m_cbData,
         sizeof(PerObjectCB));
 }
@@ -2107,6 +2198,244 @@ bool D3D12Context::CreatePipelineState()
 }
 
 // геометрия
+bool D3D12Context::CreateTerrainGeometry(const std::vector<unsigned short>& heights, int width, int height)
+{
+    // Keep 16-bit source precision; sample a bounded grid in linear height space.
+    constexpr int maxGridSide = TerrainGridCells + 1;
+    constexpr float terrainSize = 2000.0f;
+    constexpr float heightScale = 400.0f;
+    const auto heightRange = std::minmax_element(heights.begin(), heights.end());
+    const float sourceMin = float(*heightRange.first);
+    const float sourceSpan = float(*heightRange.second) - sourceMin;
+    // Map the actual source range to the intended vertical relief, preserving shape.
+    const float heightMultiplier = sourceSpan > 0.0f ? heightScale / sourceSpan : 0.0f;
+    const int columns = maxGridSide;
+    const int rows = maxGridSide;
+    const float longestSide = float((std::max)(width - 1, height - 1));
+    const float sizeX = terrainSize * (width - 1) / longestSide;
+    const float sizeZ = terrainSize * (height - 1) / longestSide;
+    const float stepX = sizeX / (columns - 1);
+    const float stepZ = sizeZ / (rows - 1);
+    struct TerrainVertex { XMFLOAT3 p; XMFLOAT3 n; XMFLOAT2 uv; };
+    std::vector<TerrainVertex> vertices(size_t(columns) * rows);
+    float minHeight = heightScale, maxHeight = 0.0f;
+    for (int z = 0; z < rows; ++z)
+    {
+        for (int x = 0; x < columns; ++x)
+        {
+            const float u = float(x) / (columns - 1);
+            const float v = float(z) / (rows - 1);
+            const float sx = u * (width - 1), sz = v * (height - 1);
+            const int x0 = int(sx), z0 = int(sz);
+            const int x1 = (std::min)(x0 + 1, width - 1);
+            const int z1 = (std::min)(z0 + 1, height - 1);
+            const float tx = sx - x0, tz = sz - z0;
+            const float a = heights[size_t(z0) * width + x0] * (1.0f - tx) + heights[size_t(z0) * width + x1] * tx;
+            const float b = heights[size_t(z1) * width + x0] * (1.0f - tx) + heights[size_t(z1) * width + x1] * tx;
+            const float y = (a * (1.0f - tz) + b * tz - sourceMin) * heightMultiplier;
+            vertices[size_t(z) * columns + x] = { {u * sizeX - sizeX * 0.5f, y, v * sizeZ - sizeZ * 0.5f}, {0, 1, 0}, {u, v} };
+            minHeight = (std::min)(minHeight, y);
+            maxHeight = (std::max)(maxHeight, y);
+        }
+    }
+    for (int z = 0; z < rows; ++z)
+    {
+        for (int x = 0; x < columns; ++x)
+        {
+            const int left = (std::max)(0, x - 1), right = (std::min)(columns - 1, x + 1);
+            const int back = (std::max)(0, z - 1), front = (std::min)(rows - 1, z + 1);
+            const float dx = (vertices[size_t(z) * columns + right].p.y - vertices[size_t(z) * columns + left].p.y) / ((right - left) * stepX);
+            const float dz = (vertices[size_t(front) * columns + x].p.y - vertices[size_t(back) * columns + x].p.y) / ((front - back) * stepZ);
+            XMStoreFloat3(&vertices[size_t(z) * columns + x].n, XMVector3Normalize(XMVectorSet(-dx, 1.0f, -dz, 0.0f)));
+        }
+    }
+    std::vector<uint32_t> indices;
+    indices.reserve(size_t(columns - 1) * (rows - 1) * 6);
+    std::vector<BoundingBox> tileBounds;
+    std::vector<Submesh> tileRanges;
+    m_terrainNodes.clear();
+    m_terrainTilesEnabled.fill(true);
+    // Prebuild all four levels. Index i identifies the same node, mesh and object.
+    std::function<int(int, int, int, UINT)> buildNode = [&](int tileX, int tileZ, int cells, UINT level)
+    {
+        const int nodeIndex = int(m_terrainNodes.size());
+        TerrainNode node{};
+        node.X = tileX; node.Z = tileZ; node.Cells = cells; node.Level = level;
+        m_terrainNodes.push_back(node);
+        const int endX = tileX + cells, endZ = tileZ + cells;
+        BoundingBox bounds{};
+        bounds.Min = XMFLOAT3(vertices[size_t(tileZ) * columns + tileX].p.x, heightScale,
+            vertices[size_t(tileZ) * columns + tileX].p.z);
+        bounds.Max = XMFLOAT3(vertices[size_t(endZ) * columns + endX].p.x, 0.0f,
+            vertices[size_t(endZ) * columns + endX].p.z);
+        for (int z = tileZ; z <= endZ; ++z)
+            for (int x = tileX; x <= endX; ++x)
+            {
+                const float y = vertices[size_t(z) * columns + x].p.y;
+                bounds.Min.y = (std::min)(bounds.Min.y, y);
+                bounds.Max.y = (std::max)(bounds.Max.y, y);
+            }
+        const UINT firstIndex = UINT(indices.size());
+        const int step = cells / TerrainLeafCells; // 8, 4, 2, 1: increasingly dense geometry.
+        for (int z = tileZ; z < endZ; z += step)
+            for (int x = tileX; x < endX; x += step)
+            {
+                const uint32_t a = z * columns + x, b = a + step;
+                const uint32_t c = a + step * columns, d = c + step;
+                if (step == 1 || (x != tileX && z != tileZ && x + step != endX && z + step != endZ))
+                    indices.insert(indices.end(), { a, c, b, b, c, d });
+                else
+                {
+                    // Full-resolution outer edges coincide at ANY adjacent LOD.
+                    // Fan only the boundary cells; no skirts or overlapping parents.
+                    std::vector<uint32_t> edge;
+                    for (int i = 0; i < step; i += (x == tileX ? 1 : step)) edge.push_back(a + i * columns);
+                    for (int i = 0; i < step; i += (z + step == endZ ? 1 : step)) edge.push_back(c + i);
+                    for (int i = 0; i < step; i += (x + step == endX ? 1 : step)) edge.push_back(d - i * columns);
+                    for (int i = 0; i < step; i += (z == tileZ ? 1 : step)) edge.push_back(b - i);
+                    const uint32_t center = a + (step / 2) * columns + step / 2;
+                    for (size_t i = 0; i < edge.size(); ++i)
+                        indices.insert(indices.end(), { center, edge[i], edge[(i + 1) % edge.size()] });
+                }
+            }
+        // Measure loss of shape against the fine grid, rather than distance alone.
+        float maxError = 0.0f;
+        if (step > 1)
+            for (int z = tileZ; z < endZ; ++z)
+                for (int x = tileX; x < endX; ++x)
+                {
+                    const int cellX = tileX + ((x - tileX) / step) * step;
+                    const int cellZ = tileZ + ((z - tileZ) / step) * step;
+                    const float u = float(x - cellX) / step, v = float(z - cellZ) / step;
+                    const float a = vertices[size_t(cellZ) * columns + cellX].p.y;
+                    const float b = vertices[size_t(cellZ) * columns + cellX + step].p.y;
+                    const float c = vertices[size_t(cellZ + step) * columns + cellX].p.y;
+                    const float d = vertices[size_t(cellZ + step) * columns + cellX + step].p.y;
+                    const float coarse = u + v <= 1.0f ? a + u * (b - a) + v * (c - a)
+                        : d + (1.0f - u) * (c - d) + (1.0f - v) * (b - d);
+                    maxError = (std::max)(maxError, std::abs(vertices[size_t(z) * columns + x].p.y - coarse));
+                }
+        // Conservative margin for the finer boundary fan topology.
+        m_terrainNodes[nodeIndex].MaxHeightError = 2.0f * maxError;
+        tileRanges.push_back({ firstIndex, UINT(indices.size()) - firstIndex, -1, 0 });
+        tileBounds.push_back(bounds);
+        if (level < 3)
+            for (int child = 0; child < 4; ++child)
+            {
+                const int childIndex = buildNode(tileX + (child % 2) * cells / 2,
+                    tileZ + (child / 2) * cells / 2, cells / 2, level + 1);
+                m_terrainNodes[nodeIndex].Children[child] = childIndex;
+            }
+        return nodeIndex;
+    };
+    buildNode(0, 0, TerrainGridCells, 0);
+    auto uploadBuffer = [&](const void* data, UINT bytes, ComPtr<ID3D12Resource>& buffer) -> bool
+    {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = bytes;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer)))) return false;
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead = { 0, 0 };
+        if (FAILED(buffer->Map(0, &noRead, &mapped))) return false;
+        std::memcpy(mapped, data, bytes);
+        buffer->Unmap(0, nullptr);
+        return true;
+    };
+    const UINT vbSize = UINT(vertices.size() * sizeof(TerrainVertex));
+    const UINT ibSize = UINT(indices.size() * sizeof(uint32_t));
+    if (!uploadBuffer(vertices.data(), vbSize, m_vertexBuffer) ||
+        !uploadBuffer(indices.data(), ibSize, m_indexBuffer)) return false;
+    m_vbView = { m_vertexBuffer->GetGPUVirtualAddress(), vbSize, sizeof(TerrainVertex) };
+    m_ibView = { m_indexBuffer->GetGPUVirtualAddress(), ibSize, DXGI_FORMAT_R32_UINT };
+    m_indexCount = UINT(indices.size());
+    m_use32BitIndices = true;
+    m_submeshes = { { 0, m_indexCount, -1, 0 } };
+    m_modelBoundsLocal.Min = XMFLOAT3(-sizeX * 0.5f, minHeight, -sizeZ * 0.5f);
+    m_modelBoundsLocal.Max = XMFLOAT3(sizeX * 0.5f, maxHeight, sizeZ * 0.5f);
+    m_sceneMeshes.clear();
+    for (size_t i = 0; i < tileRanges.size(); ++i)
+    {
+        MeshData tile = CaptureCurrentMesh();
+        tile.IndexCount = tileRanges[i].IndexCount;
+        tile.Submeshes = { tileRanges[i] };
+        tile.BoundsLocal = tileBounds[i];
+        m_sceneMeshes.push_back(std::move(tile));
+    }
+    return true;
+}
+
+UINT D3D12Context::GetTerrainTileCount() const
+{
+    return m_currentScene == Scene::Terrain ? 64u : 0u;
+}
+
+bool D3D12Context::IsTerrainTileEnabled(UINT tileIndex) const
+{
+    return tileIndex < GetTerrainTileCount() && m_terrainTilesEnabled[tileIndex];
+}
+
+void D3D12Context::SetTerrainTileEnabled(UINT tileIndex, bool enabled)
+{
+    if (tileIndex < GetTerrainTileCount())
+    {
+        m_terrainTilesEnabled[tileIndex] = enabled;
+    }
+}
+
+void D3D12Context::UpdateTerrainSelection()
+{
+    if (m_currentScene != Scene::Terrain || m_terrainNodes.empty()) return;
+    m_terrainLodCounts.fill(0);
+    for (auto& node : m_terrainNodes) node.Selected = false;
+    SelectTerrainNode(0);
+}
+
+void D3D12Context::SelectTerrainNode(UINT nodeIndex)
+{
+    TerrainNode& node = m_terrainNodes[nodeIndex];
+    // Preserve manual visibility of the original 8x8 leaf tiles even at coarse LOD.
+    int enabled = 0, total = 0;
+    for (int z = node.Z / TerrainLeafCells; z < (node.Z + node.Cells) / TerrainLeafCells; ++z)
+        for (int x = node.X / TerrainLeafCells; x < (node.X + node.Cells) / TerrainLeafCells; ++x)
+        {
+            ++total;
+            if (m_terrainTilesEnabled[z * 8 + x]) ++enabled;
+        }
+    if (enabled == 0) { node.Split = false; return; }
+    const BoundingBox& b = m_sceneMeshes[nodeIndex].BoundsLocal;
+    const float dx = m_cameraPos.x - (std::clamp)(m_cameraPos.x, b.Min.x, b.Max.x);
+    const float dy = m_cameraPos.y - (std::clamp)(m_cameraPos.y, b.Min.y, b.Max.y);
+    const float dz = m_cameraPos.z - (std::clamp)(m_cameraPos.z, b.Min.z, b.Max.z);
+    const float size = (std::max)(b.Max.x - b.Min.x, b.Max.z - b.Min.z);
+    // Separate split/merge distances avoid oscillation near the threshold.
+    const float threshold = size * (node.Split ? 1.5f : 1.2f);
+    const float distance = (std::max)(1.0f, std::sqrt(dx * dx + dy * dy + dz * dz));
+    const float projectedError = node.MaxHeightError * float(m_height) /
+        (2.0f * std::tan(XM_PIDIV4 * 0.5f) * distance);
+    const float pixelThreshold = node.Split ? 1.5f : 2.0f;
+    node.Split = node.Level < 3 && (!m_terrainLodEnabled || enabled != total ||
+        distance < threshold || projectedError > pixelThreshold);
+    if (node.Split)
+    {
+        for (int child : node.Children) SelectTerrainNode(UINT(child));
+    }
+    else
+    {
+        node.Selected = true;
+        m_sceneObjects[nodeIndex].DiffuseSrvIndex = m_terrainLodDebug ? 100 + node.Level : 0;
+        ++m_terrainLodCounts[node.Level];
+    }
+}
+
 bool D3D12Context::CreateGeometry()
 {
     struct V { XMFLOAT3 p; XMFLOAT3 n; XMFLOAT2 uv; };
@@ -2527,7 +2856,7 @@ bool D3D12Context::LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir)
 bool D3D12Context::CreateConstantBuffer()
 {
     m_constantBufferStride = (sizeof(PerObjectCB) + 255) & ~255u;
-    const UINT64 cbSize = UINT64(m_constantBufferStride) * UINT64(MaxSceneConstantBufferSlots);
+    const UINT64 cbSize = UINT64(m_constantBufferStride) * UINT64(MaxSceneConstantBufferSlots) * FrameCount;
 
     D3D12_HEAP_PROPERTIES upload{};
     upload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -2674,7 +3003,7 @@ void D3D12Context::DrawSceneGeometry(
     for (UINT objectIndex = 0; objectIndex < static_cast<UINT>(m_sceneObjects.size()); ++objectIndex)
     {
         const SceneObject& object = m_sceneObjects[objectIndex];
-        if (!object.Visible)
+        if (!object.Enabled || !object.Visible)
         {
             continue;
         }
@@ -2721,12 +3050,16 @@ void D3D12Context::DrawSceneShadowGeometry(
     ID3D12GraphicsCommandList* commandList,
     UINT displacementRootParameterIndex,
     const XMFLOAT4X4& viewMatrix,
-    const XMFLOAT4X4& projMatrix)
+    const XMFLOAT4X4& projMatrix,
+    UINT cascadeIndex)
 {
+    const UINT shadowBase = ShadowPassCBOffset + (std::min)(cascadeIndex, SceneShadowCascadeCount - 1) * MaxSceneObjects;
     if (commandList == nullptr)
     {
         return;
     }
+
+    UpdateTerrainSelection();
 
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
@@ -2762,8 +3095,8 @@ void D3D12Context::DrawSceneShadowGeometry(
     if (m_sceneObjects.empty())
     {
         static const XMFLOAT4X4 identity = MakeIdentityMatrix();
-        UpdateCBWithMatrices(identity, viewMatrix, projMatrix, ShadowPassCBOffset, 0, true);
-        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(ShadowPassCBOffset));
+        UpdateCBWithMatrices(identity, viewMatrix, projMatrix, shadowBase, 0, true);
+        commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowBase));
         const MeshData mesh = CaptureCurrentMesh();
         bindMesh(mesh);
         drawMesh(mesh);
@@ -2774,11 +3107,16 @@ void D3D12Context::DrawSceneShadowGeometry(
     {
         const SceneObject& object = m_sceneObjects[objectIndex];
 
+        // Disabled terrain tiles must not cast shadows either. Camera culling
+        // is deliberately not used here: off-screen tiles can cast visible shadows.
+        if (!object.Enabled || (m_currentScene == Scene::Terrain && !m_terrainNodes[objectIndex].Selected))
+            continue;
+
         if (m_currentScene == Scene::ChickenField && !m_lodMeshes.empty())
         {
             const UINT lodIndex = SelectCrowdLodIndex(object);
             const MeshData& mesh = m_lodMeshes[lodIndex];
-            const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
+            const UINT shadowObjectIndex = shadowBase + objectIndex;
             UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, lodIndex, true);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
             bindMesh(mesh);
@@ -2789,7 +3127,7 @@ void D3D12Context::DrawSceneShadowGeometry(
             const MeshData& mesh = (object.MeshIndex < m_sceneMeshes.size())
                 ? m_sceneMeshes[object.MeshIndex]
                 : CaptureCurrentMesh();
-            const UINT shadowObjectIndex = ShadowPassCBOffset + objectIndex;
+            const UINT shadowObjectIndex = shadowBase + objectIndex;
             UpdateCBWithMatrices(object.World, viewMatrix, projMatrix, shadowObjectIndex, 0, true);
             commandList->SetGraphicsRootConstantBufferView(0, GetSceneConstantBufferAddress(shadowObjectIndex));
             bindMesh(mesh);
@@ -2821,7 +3159,7 @@ ID3D12RootSignature* D3D12Context::GetSceneRootSignature() const
 D3D12_GPU_VIRTUAL_ADDRESS D3D12Context::GetSceneConstantBufferAddress(UINT objectIndex) const
 {
     const UINT safeIndex = (std::min)(objectIndex, MaxSceneConstantBufferSlots - 1);
-    return m_constantBuffer->GetGPUVirtualAddress() + UINT64(safeIndex) * UINT64(m_constantBufferStride);
+    return m_constantBuffer->GetGPUVirtualAddress() + (UINT64(m_frameIndex) * MaxSceneConstantBufferSlots + safeIndex) * UINT64(m_constantBufferStride);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Context::GetCurrentBackBufferRTV() const
