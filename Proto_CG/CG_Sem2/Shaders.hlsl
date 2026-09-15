@@ -6,6 +6,7 @@ cbuffer PerObjectCB : register(b0)
     float4 UVTransform;
     float4 TimeParams;
     float4 TessellationParams;
+    float4 TerrainDebugParams;
 };
 
 Texture2D gTex : register(t0);
@@ -249,6 +250,13 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float4 albedo = SampleAntiAliased(gTex, uv);
     albedo.rgb = pow(saturate(albedo.rgb), 2.2f);
+    if (TerrainDebugParams.w > 0.5f)
+    {
+        float2 localUV = (input.UV - TerrainDebugParams.xy) / TerrainDebugParams.z;
+        float2 edgeDistance = min(localUV, 1.0f - localUV);
+        float2 coverage = smoothstep(0.0f.xx, max(fwidth(localUV) * 1.5f, 0.00001f.xx), edgeDistance);
+        albedo.rgb = lerp(0.008f.xxx, albedo.rgb, min(coverage.x, coverage.y));
+    }
 
     const float metallic = 0.0f;
     float3 V = normalize(-input.ViewPos);

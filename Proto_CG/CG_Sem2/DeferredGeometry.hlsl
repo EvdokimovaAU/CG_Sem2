@@ -6,6 +6,7 @@ cbuffer PerObjectCB : register(b0)
     float4 UVTransform;
     float4 TimeParams;
     float4 TessellationParams;
+    float4 TerrainDebugParams; // UV origin, size, enabled
 };
 
 Texture2D gTex : register(t0);
@@ -174,6 +175,14 @@ GBufferOutput PSMain(PSInput input)
     const float lodFilterStrength = saturate(TimeParams.y);
     float4 albedo = SampleByLodStrength(gTex, uv, lodFilterStrength);
     albedo.rgb = pow(saturate(albedo.rgb), 2.2f);
+    if (TerrainDebugParams.w > 0.5f)
+    {
+        float2 localUV = (input.UV - TerrainDebugParams.xy) / TerrainDebugParams.z;
+        float2 edgeDistance = min(localUV, 1.0f - localUV);
+        float2 lineWidth = max(fwidth(localUV) * 1.5f, 0.00001f.xx);
+        float2 coverage = smoothstep(0.0f.xx, lineWidth, edgeDistance);
+        albedo.rgb = lerp(0.008f.xxx, albedo.rgb, min(coverage.x, coverage.y));
+    }
     float roughness = SampleByLodStrength(gRoughnessTex, uv, lodFilterStrength).r;
     roughness = clamp(roughness, 0.045f, 1.0f);
     float3 normalSample = SampleByLodStrength(gNormalTex, uv, lodFilterStrength).xyz * 2.0f - 1.0f;

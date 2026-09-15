@@ -1,6 +1,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "D3D12Context.h"
-#include "stb_image.h"
+#include "TerrainHeightmap.h"
 #include <windows.h>
 #include <d3dcompiler.h>
 #include <vector>
@@ -162,19 +162,23 @@ bool D3D12Context::LoadScene(Scene scene)
     const fs::path modelsDir = fs::path(exeDirA) / "models";
     // Decode before releasing the current scene.
     std::vector<unsigned short> terrainHeights;
-    int terrainWidth = 0, terrainHeight = 0, terrainChannels = 0;
+    int terrainWidth = 0, terrainHeight = 0;
     if (scene == Scene::Terrain)
     {
-        const std::string path = (modelsDir / "Heightmap.png").string();
-        stbi_us* pixels = stbi_load_16(path.c_str(), &terrainWidth, &terrainHeight, &terrainChannels, 1);
-        if (!pixels || terrainWidth < 2 || terrainHeight < 2)
+        TerrainHeightmap heightmap;
+        std::string error;
+        const fs::path exportDir = fs::path(exeDirA) / "HightMap";
+        const fs::path terrainDir = fs::is_directory(exportDir) ? exportDir : modelsDir;
+        if (!LoadTerrainHeightmap(terrainDir, heightmap, error))
         {
-            OutputDebugStringA(("Terrain: invalid or missing heightmap: " + path + "\n").c_str());
-            stbi_image_free(pixels);
+            OutputDebugStringA((error + "\n").c_str());
             return false;
         }
-        terrainHeights.assign(pixels, pixels + size_t(terrainWidth) * terrainHeight);
-        stbi_image_free(pixels);
+        terrainWidth = heightmap.Width;
+        terrainHeight = heightmap.Height;
+        terrainHeights = std::move(heightmap.Heights);
+        OutputDebugStringA(("Terrain from " + terrainDir.string() + ": loaded " + std::to_string(heightmap.SourceTileCount) +
+            " source map(s), " + std::to_string(terrainWidth) + " x " + std::to_string(terrainHeight) + "\n").c_str());
     }
     const fs::path woodRootDir =
         fs::path(exeDirA) / "Stuff" / "PBR models" / "wood_root";
@@ -206,6 +210,8 @@ bool D3D12Context::LoadScene(Scene scene)
     m_octreeNodes.clear();
     m_terrainNodes.clear();
     m_terrainLodCounts.fill(0);
+    m_terrainCullStats.fill(0);
+    m_terrainTriangleCount = 0;
     m_octreeRoot = -1;
     m_indexCount = 0;
     m_use32BitIndices = false;
@@ -886,11 +892,10 @@ void D3D12Context::UpdateObjectVisibility()
 {
     if (m_currentScene == Scene::Terrain)
     {
-        UpdateTerrainSelection();
         const Frustum frustum = BuildCameraFrustum();
+        UpdateTerrainSelection(m_frustumCullingEnabled ? &frustum : nullptr);
         for (size_t i = 0; i < m_sceneObjects.size(); ++i)
-            m_sceneObjects[i].Visible = m_terrainNodes[i].Selected &&
-                (!m_frustumCullingEnabled || IntersectsFrustum(m_sceneObjects[i].BoundsWorld, frustum));
+            m_sceneObjects[i].Visible = m_terrainNodes[i].Selected;
         return;
     }
     if (m_sceneObjects.empty())
@@ -1100,7 +1105,11 @@ Frustum D3D12Context::BuildCameraFrustum() const
         1.0f,
         20000.0f);
     const XMMATRIX viewProj = XMMatrixMultiply(view, proj);
+    return BuildMatrixFrustum(viewProj);
+}
 
+Frustum D3D12Context::BuildMatrixFrustum(const XMMATRIX& viewProj) const
+{
     XMFLOAT4X4 m{};
     XMStoreFloat4x4(&m, viewProj);
 
@@ -1368,6 +1377,13 @@ void D3D12Context::UpdateCBWithMatrices(
     }
 
     const UINT safeIndex = (std::min)(objectIndex, MaxSceneConstantBufferSlots - 1);
+    m_cbData.TerrainDebugParams = XMFLOAT4(0, 0, 1, 0);
+    if (m_currentScene == Scene::Terrain && m_terrainLodDebug && !shadowPass && objectIndex < m_terrainNodes.size())
+    {
+        const auto& node = m_terrainNodes[objectIndex];
+        m_cbData.TerrainDebugParams = XMFLOAT4(float(node.X) / TerrainGridCells,
+            float(node.Z) / TerrainGridCells, float(node.Cells) / TerrainGridCells, 1.0f);
+    }
     std::memcpy(
         m_cbMappedData + (size_t(m_frameIndex) * MaxSceneConstantBufferSlots + safeIndex) * size_t(m_constantBufferStride),
         &m_cbData,
@@ -2391,17 +2407,41 @@ void D3D12Context::SetTerrainTileEnabled(UINT tileIndex, bool enabled)
     }
 }
 
-void D3D12Context::UpdateTerrainSelection()
+void D3D12Context::SetTerrainForcedLod(int level)
 {
-    if (m_currentScene != Scene::Terrain || m_terrainNodes.empty()) return;
-    m_terrainLodCounts.fill(0);
-    for (auto& node : m_terrainNodes) node.Selected = false;
-    SelectTerrainNode(0);
+    m_terrainForcedLod = level >= 0 && level <= 3 ? level : -1;
+    // A demonstration mode must not leave hysteresis from a forced level in AUTO.
+    for (auto& node : m_terrainNodes) node.Split = false;
 }
 
-void D3D12Context::SelectTerrainNode(UINT nodeIndex)
+void D3D12Context::UpdateTerrainSelection(const Frustum* frustum, bool cameraPass)
+{
+    if (m_currentScene != Scene::Terrain || m_terrainNodes.empty()) return;
+    if (cameraPass)
+    {
+        m_terrainLodCounts.fill(0);
+        m_terrainCullStats.fill(0);
+        m_terrainTriangleCount = 0;
+    }
+    for (auto& node : m_terrainNodes) node.Selected = false;
+    SelectTerrainNode(0, frustum, cameraPass);
+}
+
+void D3D12Context::SelectTerrainNode(UINT nodeIndex, const Frustum* frustum, bool cameraPass)
 {
     TerrainNode& node = m_terrainNodes[nodeIndex];
+    if (cameraPass) ++m_terrainCullStats[0];
+    // Test the parent before visibility masks or LOD work; reject the entire subtree.
+    if (frustum && !IntersectsFrustum(m_sceneMeshes[nodeIndex].BoundsLocal, *frustum))
+    {
+        if (cameraPass)
+        {
+            ++m_terrainCullStats[1];
+            static constexpr UINT descendants[] = { 84, 20, 4, 0 };
+            m_terrainCullStats[2] += descendants[node.Level];
+        }
+        return;
+    }
     // Preserve manual visibility of the original 8x8 leaf tiles even at coarse LOD.
     int enabled = 0, total = 0;
     for (int z = node.Z / TerrainLeafCells; z < (node.Z + node.Cells) / TerrainLeafCells; ++z)
@@ -2422,17 +2462,22 @@ void D3D12Context::SelectTerrainNode(UINT nodeIndex)
     const float projectedError = node.MaxHeightError * float(m_height) /
         (2.0f * std::tan(XM_PIDIV4 * 0.5f) * distance);
     const float pixelThreshold = node.Split ? 1.5f : 2.0f;
-    node.Split = node.Level < 3 && (!m_terrainLodEnabled || enabled != total ||
-        distance < threshold || projectedError > pixelThreshold);
+    const bool refine = m_terrainForcedLod >= 0 ? int(node.Level) < m_terrainForcedLod
+        : distance < threshold || projectedError > pixelThreshold;
+    node.Split = node.Level < 3 && (enabled != total || refine);
     if (node.Split)
     {
-        for (int child : node.Children) SelectTerrainNode(UINT(child));
+        for (int child : node.Children) SelectTerrainNode(UINT(child), frustum, cameraPass);
     }
     else
     {
         node.Selected = true;
         m_sceneObjects[nodeIndex].DiffuseSrvIndex = m_terrainLodDebug ? 100 + node.Level : 0;
-        ++m_terrainLodCounts[node.Level];
+        if (cameraPass)
+        {
+            ++m_terrainLodCounts[node.Level];
+            m_terrainTriangleCount += m_sceneMeshes[nodeIndex].IndexCount / 3;
+        }
     }
 }
 
@@ -3059,7 +3104,10 @@ void D3D12Context::DrawSceneShadowGeometry(
         return;
     }
 
-    UpdateTerrainSelection();
+    // Shadow casters use the light's frustum, not the camera's: off-screen hills
+    // can still cast shadows onto visible terrain. Do not overwrite camera stats.
+    const Frustum lightFrustum = BuildMatrixFrustum(XMLoadFloat4x4(&viewMatrix) * XMLoadFloat4x4(&projMatrix));
+    UpdateTerrainSelection(&lightFrustum, false);
 
     D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);

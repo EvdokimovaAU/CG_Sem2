@@ -95,7 +95,7 @@ int Application::Run()
         {
             m_selectedTerrainTile = 0;
             if (!m_renderingSystem.LoadScene(RenderingSystem::Scene::Terrain))
-                MessageBoxW(m_window.GetHWND(), L"Cannot load Terrain. Check models/Heightmap.png next to the executable and the debug output.", L"Terrain", MB_OK | MB_ICONERROR);
+                MessageBoxW(m_window.GetHWND(), L"Cannot load Terrain. Check HightMap/R1C1.png through R4C4.png next to the executable (all 16, same dimensions). The combined MapNG_Batch_Heightmap_Grid.png is used only when no tiles exist. See debug output for the exact file.", L"Terrain", MB_OK | MB_ICONERROR);
         }
 
         const bool previousTileDown = m_input.IsKeyDown(VK_OEM_4);
@@ -105,7 +105,7 @@ int Application::Run()
         const bool lodDown = m_input.IsKeyDown('L');
         const bool debugDown = m_input.IsKeyDown('V');
         if (tileCount > 0 && lodDown && !m_toggleTerrainLodWasDown)
-            m_renderingSystem.SetTerrainLodEnabled(!m_renderingSystem.IsTerrainLodEnabled());
+            m_renderingSystem.SetTerrainForcedLod(m_renderingSystem.GetTerrainForcedLod() + 1);
         if (tileCount > 0 && debugDown && !m_toggleTerrainDebugWasDown)
             m_renderingSystem.SetTerrainLodDebug(!m_renderingSystem.IsTerrainLodDebug());
         m_toggleTerrainLodWasDown = lodDown;
@@ -127,11 +127,15 @@ int Application::Run()
             if (tileCount > 0)
             {
                 const auto counts = m_renderingSystem.GetTerrainLodCounts();
-                swprintf_s(title, L"Terrain | LOD 0/1/2/3: %u/%u/%u/%u | L: %ls | V: colors | Tile %u/%u %ls [ ] T",
-                    counts[0], counts[1], counts[2], counts[3],
-                    m_renderingSystem.IsTerrainLodEnabled() ? L"AUTO" : L"FINE",
-                    m_selectedTerrainTile + 1, tileCount,
-                    m_renderingSystem.IsTerrainTileEnabled(m_selectedTerrainTile) ? L"ON" : L"OFF");
+                const auto cull = m_renderingSystem.GetTerrainCullStats();
+                const wchar_t* lodModes[] = { L"AUTO", L"0 RED", L"1 YELLOW", L"2 GREEN", L"3 BLUE" };
+                swprintf_s(title, L"Terrain | L:%ls V:%ls Q:%ls | tris:%u | LOD:%u/%u/%u/%u | visit:%u skip:%u | tile:%u %ls",
+                    lodModes[m_renderingSystem.GetTerrainForcedLod() + 1],
+                    m_renderingSystem.IsTerrainLodDebug() ? L"ON" : L"OFF",
+                    m_renderingSystem.IsFrustumCullingEnabled() ? L"ON" : L"OFF",
+                    m_renderingSystem.GetTerrainTriangleCount(),
+                    counts[0], counts[1], counts[2], counts[3], cull[0], cull[2],
+                    m_selectedTerrainTile + 1, m_renderingSystem.IsTerrainTileEnabled(m_selectedTerrainTile) ? L"ON" : L"OFF");
             }
             else
                 swprintf_s(title, L"KG_Laba4 - DX12 Final | Scenes 1-5 (5: Terrain)");

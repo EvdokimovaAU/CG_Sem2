@@ -22,6 +22,7 @@ struct PerObjectCB
     XMFLOAT4 UVTransform;
     XMFLOAT4 TimeParams;
     XMFLOAT4 TessellationParams;
+    XMFLOAT4 TerrainDebugParams;
 };
 
 struct Submesh
@@ -99,11 +100,15 @@ public:
     UINT GetTerrainTileCount() const;
     bool IsTerrainTileEnabled(UINT tileIndex) const;
     void SetTerrainTileEnabled(UINT tileIndex, bool enabled);
-    void SetTerrainLodEnabled(bool enabled) { m_terrainLodEnabled = enabled; }
-    bool IsTerrainLodEnabled() const { return m_terrainLodEnabled; }
+    void SetTerrainLodEnabled(bool enabled) { SetTerrainForcedLod(enabled ? -1 : 3); }
+    bool IsTerrainLodEnabled() const { return m_terrainForcedLod < 0; }
+    void SetTerrainForcedLod(int level);
+    int GetTerrainForcedLod() const { return m_terrainForcedLod; }
+    UINT GetTerrainTriangleCount() const { return m_terrainTriangleCount; }
     void SetTerrainLodDebug(bool enabled) { m_terrainLodDebug = enabled; }
     bool IsTerrainLodDebug() const { return m_terrainLodDebug; }
     std::array<UINT, 4> GetTerrainLodCounts() const { return m_terrainLodCounts; }
+    std::array<UINT, 3> GetTerrainCullStats() const { return m_terrainCullStats; }
     void Shutdown();
     void SetFrustumCullingEnabled(bool enabled);
     bool IsFrustumCullingEnabled() const;
@@ -170,8 +175,8 @@ private:
     bool CreatePipelineState();
     bool CreateGeometry();
     bool CreateTerrainGeometry(const std::vector<unsigned short>& heights, int width, int height);
-    void UpdateTerrainSelection();
-    void SelectTerrainNode(UINT nodeIndex);
+    void UpdateTerrainSelection(const Frustum* frustum = nullptr, bool cameraPass = true);
+    void SelectTerrainNode(UINT nodeIndex, const Frustum* frustum, bool cameraPass);
     bool LoadModelFromOBJ(const char* objPath, const char* mtlBaseDir);
     bool CreateConstantBuffer();
     bool CompileShaders();
@@ -193,6 +198,7 @@ private:
     int BuildOctreeNode(const BoundingBox& bounds, const std::vector<UINT>& objectIndices, UINT depth);
     void QueryOctreeVisible(int nodeIndex, const Frustum& frustum, std::vector<UINT>& visibleIndices) const;
     Frustum BuildCameraFrustum() const;
+    Frustum BuildMatrixFrustum(const DirectX::XMMATRIX& viewProj) const;
     DirectX::XMFLOAT4 NormalizePlane(const DirectX::XMFLOAT4& plane) const;
     bool IntersectsFrustum(const BoundingBox& bounds, const Frustum& frustum) const;
     bool ContainsBounds(const BoundingBox& outer, const BoundingBox& inner) const;
@@ -288,7 +294,9 @@ private:
     std::vector<TerrainNode> m_terrainNodes;
     std::array<bool, 64> m_terrainTilesEnabled{};
     std::array<UINT, 4> m_terrainLodCounts{};
-    bool m_terrainLodEnabled = true;
+    std::array<UINT, 3> m_terrainCullStats{}; // visited, rejected roots, skipped descendants (camera only)
+    int m_terrainForcedLod = -1; // -1: AUTO, 0..3: fixed depth for demonstration
+    UINT m_terrainTriangleCount = 0;
     bool m_terrainLodDebug = false;
     std::vector<std::string> m_materialDiffusePaths;
     std::vector<UINT> m_materialToSrv;

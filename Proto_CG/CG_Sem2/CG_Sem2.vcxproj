@@ -148,6 +148,7 @@
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="stb_image.h" />
+    <ClInclude Include="TerrainHeightmap.h" />
     <ClInclude Include="tiny_obj_loader.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="Win32Window.h" />

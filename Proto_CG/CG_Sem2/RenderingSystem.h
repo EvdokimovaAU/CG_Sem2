@@ -28,9 +28,13 @@ public:
     void SetTerrainTileEnabled(UINT tileIndex, bool enabled) { m_context.SetTerrainTileEnabled(tileIndex, enabled); }
     void SetTerrainLodEnabled(bool enabled) { m_context.SetTerrainLodEnabled(enabled); }
     bool IsTerrainLodEnabled() const { return m_context.IsTerrainLodEnabled(); }
+    void SetTerrainForcedLod(int level) { m_context.SetTerrainForcedLod(level); }
+    int GetTerrainForcedLod() const { return m_context.GetTerrainForcedLod(); }
+    UINT GetTerrainTriangleCount() const { return m_context.GetTerrainTriangleCount(); }
     void SetTerrainLodDebug(bool enabled) { m_context.SetTerrainLodDebug(enabled); }
     bool IsTerrainLodDebug() const { return m_context.IsTerrainLodDebug(); }
     std::array<UINT, 4> GetTerrainLodCounts() const { return m_context.GetTerrainLodCounts(); }
+    std::array<UINT, 3> GetTerrainCullStats() const { return m_context.GetTerrainCullStats(); }
     void Shutdown();
 
     void SetTechnique(Technique technique);
